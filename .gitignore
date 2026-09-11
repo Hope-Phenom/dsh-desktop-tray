@@ -361,3 +361,6 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+# 第三方皮肤/插件下载缓存（dsh-web-ui、dsh-deep-whale 等）
+_ref/
+
