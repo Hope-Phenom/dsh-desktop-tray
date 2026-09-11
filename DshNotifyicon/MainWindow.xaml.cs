@@ -3,11 +3,14 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Reflection;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using DshNotifyicon.Services;
+using Newtonsoft.Json.Linq;
 
 namespace DshNotifyicon
 {
@@ -855,6 +858,19 @@ namespace DshNotifyicon
                 return;
             }
 
+            // 新版 dsh 的请求扩展提供方会读取所有启用插件 package.json 的 name/version，
+            // 任一为空即对每个模型请求硬抛 REQUEST_EXTENSION。必须先补齐并校验，再交给 dsh。
+            try
+            {
+                EnsurePluginManifestVersion(pluginDir);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(Loc.T("notify.manifestFixFail", ex.Message), Loc.T("app.name"), MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+
+            bool stoppedDsh = false;
             try
             {
                 var s = App.Services.Settings;
@@ -869,6 +885,16 @@ namespace DshNotifyicon
                 {
                     MessageBox.Show(Loc.T("svc.noDsh"), Loc.T("app.name"), MessageBoxButton.OK, MessageBoxImage.Information);
                     return;
+                }
+
+                // 绝不能让 pnpm 在 dsh 运行期间改写 profile 的 node_modules：
+                // Windows 上会因文件占用失败，或留下半写/悬空的链接而损坏 profile。
+                bool wasRunning = App.Services.Dsh.State != DshState.Idle;
+                if (wasRunning)
+                {
+                    TraceLog(Loc.T("notify.stopForPlugin"));
+                    await App.Services.Dsh.StopAsync();
+                    stoppedDsh = true;
                 }
 
                 // dsh 的 plugin add 内部会 spawnSync("pnpm")，缺失时先自动安装 pnpm
@@ -888,16 +914,27 @@ namespace DshNotifyicon
 
                 if (r.TimedOut || r.Cancelled || r.ExitCode != 0)
                 {
+                    // 失败也必须把之前停掉的 dsh 拉回来，绝不把用户的 dsh 留在停止状态
+                    if (stoppedDsh) await RestartAfterPluginOpAsync();
                     MessageBox.Show(Loc.T("notify.installFail", r.ExitCode, (r.Error ?? "").Trim()),
                         Loc.T("app.name"), MessageBoxButton.OK, MessageBoxImage.Error);
                     return;
                 }
 
                 EnsureNotifyPatch();
-                MessageBox.Show(Loc.T("notify.installDone"), Loc.T("app.name"), MessageBoxButton.OK, MessageBoxImage.Information);
+                if (stoppedDsh)
+                {
+                    await RestartAfterPluginOpAsync();
+                    MessageBox.Show(Loc.T("notify.installDoneRestarted"), Loc.T("app.name"), MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                else
+                {
+                    MessageBox.Show(Loc.T("notify.installDone"), Loc.T("app.name"), MessageBoxButton.OK, MessageBoxImage.Information);
+                }
             }
             catch (Exception ex)
             {
+                if (stoppedDsh) await RestartAfterPluginOpAsync();
                 MessageBox.Show(Loc.T("notify.installFail", "?", ex.Message), Loc.T("app.name"), MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
@@ -922,80 +959,250 @@ namespace DshNotifyicon
             return null;
         }
 
-        static void EnsureNotifyPatch()
+        /// <summary>当前程序集版本（3 段，如 1.2.4），作为插件清单 version 的唯一来源。</summary>
+        static string AppVersionString()
+        {
+            var v = Assembly.GetExecutingAssembly().GetName().Version;
+            return v == null ? "0.0.0" : v.ToString(3);
+        }
+
+        /// <summary>
+        /// 校验并写入 <paramref name="pluginDir"/> 下 package.json 的 version 字段，返回写入的版本号。
+        /// 新版 dsh 的请求扩展提供方会读取每个启用插件的清单，要求 name 与 version 均非空，
+        /// 否则对每个模型请求硬抛 REQUEST_EXTENSION；因此这里先校验 name，再按程序版本补齐 version
+        /// （保留其它属性）并原子写回，使安装器不可能产出版本缺失的清单。
+        /// </summary>
+        static string EnsurePluginManifestVersion(string pluginDir)
+        {
+            var file = Path.Combine(pluginDir, "package.json");
+            if (!File.Exists(file))
+                throw new InvalidOperationException(Loc.T("notify.manifestMissing", file));
+
+            var root = JObject.Parse(File.ReadAllText(file));
+            var nameToken = root["name"];
+            if (nameToken == null || nameToken.Type != JTokenType.String || string.IsNullOrWhiteSpace(nameToken.Value<string>()))
+                throw new InvalidOperationException(Loc.T("notify.manifestNoName", file));
+
+            var version = AppVersionString();
+            var versionToken = root["version"];
+            var current = versionToken == null || versionToken.Type != JTokenType.String ? null : versionToken.Value<string>();
+            if (string.Equals(current, version, StringComparison.Ordinal)) return version;
+
+            root["version"] = version;
+            var json = root.ToString(Newtonsoft.Json.Formatting.Indented);
+            if (!json.EndsWith("\n", StringComparison.Ordinal)) json += Environment.NewLine;
+            WriteFileAtomic(file, json);
+            return version;
+        }
+
+        /// <summary>原子写入文本文件：同目录写 .tmp，再 File.Replace（目标已存在）或 File.Move（目标不存在）。</summary>
+        static void WriteFileAtomic(string path, string content)
+        {
+            var tmp = path + ".tmp";
+            File.WriteAllText(tmp, content);
+            if (!File.Exists(path))
+            {
+                File.Move(tmp, path);
+                return;
+            }
+            try
+            {
+                File.Replace(tmp, path, null);
+            }
+            catch (Exception)
+            {
+                // 个别文件系统（如部分网络盘）不支持 Replace，退化为覆盖写并清理临时文件
+                File.Copy(tmp, path, true);
+                File.Delete(tmp);
+            }
+        }
+
+        // cordis.patch.yml 的条目识别：正则作用于整行（允许行首/行尾空白），注释行一律不参与判定；
+        // 完全不使用子串匹配，避免把注释或无关条目误判为插件条目。
+        static readonly Regex PatchIdLineRx = new Regex(@"^\s*-\s*id\s*:\s*dsh-notify-hook\s*$", RegexOptions.Compiled);
+        static readonly Regex PatchNameLineRx = new Regex(@"^\s*name\s*:\s*dsh-notify-hook\s*$", RegexOptions.Compiled);
+        static readonly Regex PatchInsertHeaderRx = new Regex(@"^\s*-\s*insert\s*:\s*$", RegexOptions.Compiled);
+
+        /// <summary>cordis.patch.yml 路径（DSH_HOME 未设置时回落 %USERPROFILE%\.dsh）；createDir 为 true 时确保 profile 目录存在。</summary>
+        static string NotifyPatchPath(bool createDir)
         {
             var home = Environment.GetEnvironmentVariable("DSH_HOME");
             if (string.IsNullOrEmpty(home))
                 home = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dsh");
             var profileDir = Path.Combine(home, "profiles", "web");
-            var patchPath = Path.Combine(profileDir, "cordis.patch.yml");
-            if (!Directory.Exists(profileDir)) Directory.CreateDirectory(profileDir);
+            if (createDir && !Directory.Exists(profileDir)) Directory.CreateDirectory(profileDir);
+            return Path.Combine(profileDir, "cordis.patch.yml");
+        }
 
-            var lines = new List<string>();
-            if (File.Exists(patchPath))
-                lines.AddRange(File.ReadAllLines(patchPath));
+        /// <summary>读取 patch 文件全部行；raw 为原始文本（文件不存在时为 null），用于判断是否真的需要写回。</summary>
+        static List<string> ReadPatchLines(string patchPath, out string raw)
+        {
+            raw = File.Exists(patchPath) ? File.ReadAllText(patchPath) : null;
+            return raw == null ? new List<string>() : new List<string>(File.ReadAllLines(patchPath));
+        }
 
-            bool hasMarker = false;
-            foreach (var line in lines)
+        /// <summary>按行写回（保持原文件换行风格，新文件用平台默认）；内容无变化时不写，确保无关行字节不变。</summary>
+        static void WritePatchLines(string patchPath, string raw, List<string> lines)
+        {
+            var nl = raw == null ? Environment.NewLine : (raw.Contains("\r\n") ? "\r\n" : "\n");
+            var content = lines.Count == 0 ? "" : string.Join(nl, lines) + nl;
+            if (content == raw) return;
+            WriteFileAtomic(patchPath, content);
+        }
+
+        /// <summary>注释行（# 开头，忽略缩进）不参与 YAML 结构判定。</summary>
+        static bool IsPatchCommentLine(string line)
+        {
+            return line.TrimStart().StartsWith("#", StringComparison.Ordinal);
+        }
+
+        /// <summary>插件 id 行：- id: dsh-notify-hook。</summary>
+        static bool IsPatchPluginIdLine(string line)
+        {
+            return !IsPatchCommentLine(line) && PatchIdLineRx.IsMatch(line);
+        }
+
+        /// <summary>插件 name 行：name: dsh-notify-hook。</summary>
+        static bool IsPatchPluginNameLine(string line)
+        {
+            return !IsPatchCommentLine(line) && PatchNameLineRx.IsMatch(line);
+        }
+
+        /// <summary>insert 头行：- insert:。</summary>
+        static bool IsPatchInsertHeader(string line)
+        {
+            return !IsPatchCommentLine(line) && PatchInsertHeaderRx.IsMatch(line);
+        }
+
+        /// <summary>行首缩进宽度（空格/制表符计数）。</summary>
+        static int PatchIndent(string line)
+        {
+            int i = 0;
+            while (i < line.Length && (line[i] == ' ' || line[i] == '\t')) i++;
+            return i;
+        }
+
+        /// <summary>是否为 YAML 列表项起始行（"- xxx" 或 "-"）。</summary>
+        static bool IsPatchItemLine(string line)
+        {
+            var t = line.TrimStart();
+            return t == "-" || t.StartsWith("- ", StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// 确保 cordis.patch.yml 含有 dsh-notify-hook 的 insert 条目：按 id 行或 name 行精确判定是否已存在
+        /// （绝不按子串匹配），仅在 [] 是文件里唯一真实内容时才移除该占位符，最后原子写回。
+        /// </summary>
+        static void EnsureNotifyPatch()
+        {
+            var patchPath = NotifyPatchPath(true);
+            string raw;
+            var lines = ReadPatchLines(patchPath, out raw);
+
+            bool present = false;
+            for (int i = 0; i < lines.Count; i++)
             {
-                if (line.Contains("dsh-notify-hook")) { hasMarker = true; break; }
+                if (IsPatchPluginIdLine(lines[i]) || IsPatchPluginNameLine(lines[i])) { present = true; break; }
             }
 
-            // 移除 Cordis patch 模板里的空列表占位符 []；
-            // 之前版本可能错误地保留了 [] 又追加 insert，导致 YAML 变成非法列表。
-            lines.RemoveAll(line => line.Trim() == "[]");
-
-            if (!hasMarker)
+            // Cordis patch 模板里的空列表占位符 [] 必须移除，否则与 insert 块并存会让 YAML 变成非法列表；
+            // 但只有它确实是唯一真实内容（其余仅空行/注释）时才动它，避免误删用户数据。
+            bool placeholderOnly = true;
+            foreach (var line in lines)
             {
-                if (lines.Count > 0 && lines[lines.Count - 1].Length != 0)
+                var t = line.Trim();
+                if (t.Length == 0 || t == "[]" || IsPatchCommentLine(line)) continue;
+                placeholderOnly = false;
+                break;
+            }
+            if (placeholderOnly) lines.RemoveAll(line => line.Trim() == "[]");
+
+            if (!present)
+            {
+                if (lines.Count > 0 && lines[lines.Count - 1].Trim().Length != 0)
                     lines.Add("");
                 lines.Add("- insert:");
                 lines.Add("    - id: dsh-notify-hook");
                 lines.Add("      name: dsh-notify-hook");
             }
 
-            File.WriteAllLines(patchPath, lines);
+            WritePatchLines(patchPath, raw, lines);
         }
 
+        /// <summary>
+        /// 从 cordis.patch.yml 移除 dsh-notify-hook 条目：按 id 行（无则 name 行）定位，删除该项及其同级续行
+        /// （缩进更深且不是新列表项的行，如 name 行）；仅当所在 - insert: 块已无任何剩余内容时才删除该头，
+        /// 从而不会孤立/破坏含其它条目的块。
+        /// </summary>
         static void RemoveNotifyPatch()
         {
-            var home = Environment.GetEnvironmentVariable("DSH_HOME");
-            if (string.IsNullOrEmpty(home))
-                home = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dsh");
-            var patchPath = Path.Combine(home, "profiles", "web", "cordis.patch.yml");
-            if (!File.Exists(patchPath)) return;
+            var patchPath = NotifyPatchPath(false);
+            string raw;
+            var lines = ReadPatchLines(patchPath, out raw);
+            if (raw == null) return; // 文件不存在：不动
 
-            var lines = new List<string>(File.ReadAllLines(patchPath));
-            var result = new List<string>();
+            int item = -1;
             for (int i = 0; i < lines.Count; i++)
             {
-                var line = lines[i];
-                bool isInsertHeader = line.Trim() == "- insert:";
-                bool isPluginNext = i + 1 < lines.Count && lines[i + 1].Contains("dsh-notify-hook");
-                if (isInsertHeader && isPluginNext)
+                if (IsPatchPluginIdLine(lines[i])) { item = i; break; }
+            }
+            if (item < 0)
+            {
+                for (int i = 0; i < lines.Count; i++)
                 {
-                    // 跳过 - insert: 及其紧随的 id 行；name 行会在下面按 marker 跳过
-                    i++;
-                    continue;
+                    if (IsPatchPluginNameLine(lines[i])) { item = i; break; }
                 }
-                if (line.Contains("dsh-notify-hook")) continue;
-                result.Add(line);
+            }
+            if (item < 0) return; // 没有插件条目：保持文件字节不变
+
+            // 1) 删除条目行及其同级续行，遇到缩进不更深或新列表项即停
+            int itemIndent = PatchIndent(lines[item]);
+            int end = item + 1;
+            while (end < lines.Count && PatchIndent(lines[end]) > itemIndent && !IsPatchItemLine(lines[end])) end++;
+            lines.RemoveRange(item, end - item);
+
+            // 2) 找最近的前置 - insert: 头（缩进严格更小）
+            int header = -1;
+            for (int i = item - 1; i >= 0; i--)
+            {
+                if (IsPatchInsertHeader(lines[i]) && PatchIndent(lines[i]) < itemIndent) { header = i; break; }
+            }
+            if (header >= 0)
+            {
+                // 该 insert 块内只要还剩下任何内容（其它条目、非条目子节点），就保留 - insert: 头
+                int headerIndent = PatchIndent(lines[header]);
+                bool blockHasContent = false;
+                for (int i = header + 1; i < lines.Count; i++)
+                {
+                    if (PatchIndent(lines[i]) <= headerIndent) break; // 已离开该块
+                    var t = lines[i].Trim();
+                    if (t.Length == 0 || t.StartsWith("#", StringComparison.Ordinal)) continue;
+                    blockHasContent = true;
+                    break;
+                }
+                if (!blockHasContent)
+                {
+                    lines.RemoveAt(header);
+                    // 同时吃掉该头之前的那行空行（它正是 EnsureNotifyPatch 添加的分隔空行），
+                    // 使卸载后的文件与安装前逐字节一致；空行只是排版，删除不影响 YAML 语义。
+                    if (header > 0 && lines[header - 1].Trim().Length == 0) lines.RemoveAt(header - 1);
+                }
             }
 
-            // 如果已经没有实际内容，恢复为模板占位符 []
+            // 3) 已无任何真实内容时恢复模板占位符 []
             bool hasContent = false;
-            foreach (var l in result)
+            foreach (var line in lines)
             {
-                var t = l.Trim();
-                if (t.Length > 0 && !t.StartsWith("#")) { hasContent = true; break; }
+                var t = line.Trim();
+                if (t.Length > 0 && !IsPatchCommentLine(line)) { hasContent = true; break; }
             }
             if (!hasContent)
             {
-                result.Clear();
-                result.Add("[]");
+                lines.Clear();
+                lines.Add("[]");
             }
 
-            File.WriteAllLines(patchPath, result);
+            WritePatchLines(patchPath, raw, lines);
         }
 
         async void BtnUninstallNotifyPlugin_Click(object sender, RoutedEventArgs e)
@@ -1005,6 +1212,7 @@ namespace DshNotifyicon
                 MessageBoxButton.YesNo, MessageBoxImage.Warning, Loc.T("notify.uninstallConfirmTitle"));
             if (r != MessageBoxResult.Yes) return;
 
+            bool stoppedDsh = false;
             try
             {
                 var s = App.Services.Settings;
@@ -1019,6 +1227,15 @@ namespace DshNotifyicon
                 {
                     MessageBox.Show(Loc.T("svc.noDsh"), Loc.T("app.name"), MessageBoxButton.OK, MessageBoxImage.Information);
                     return;
+                }
+
+                // 与安装同理：先停 dsh，绝不运行中让 pnpm 改写 profile 的 node_modules
+                bool wasRunning = App.Services.Dsh.State != DshState.Idle;
+                if (wasRunning)
+                {
+                    TraceLog(Loc.T("notify.stopForPlugin"));
+                    await App.Services.Dsh.StopAsync();
+                    stoppedDsh = true;
                 }
 
                 // 卸载同样走 dsh plugin → pnpm，先确保 pnpm 可用
@@ -1037,18 +1254,38 @@ namespace DshNotifyicon
 
                 if (rr.TimedOut || rr.Cancelled || rr.ExitCode != 0)
                 {
+                    if (stoppedDsh) await RestartAfterPluginOpAsync();
                     MessageBox.Show(Loc.T("notify.uninstallFail", rr.ExitCode, (rr.Error ?? "").Trim()),
                         Loc.T("app.name"), MessageBoxButton.OK, MessageBoxImage.Error);
                     return;
                 }
 
                 RemoveNotifyPatch();
-                MessageBox.Show(Loc.T("notify.uninstallDone"), Loc.T("app.name"), MessageBoxButton.OK, MessageBoxImage.Information);
+                if (stoppedDsh)
+                {
+                    await RestartAfterPluginOpAsync();
+                    MessageBox.Show(Loc.T("notify.uninstallDoneRestarted"), Loc.T("app.name"), MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                else
+                {
+                    MessageBox.Show(Loc.T("notify.uninstallDone"), Loc.T("app.name"), MessageBoxButton.OK, MessageBoxImage.Information);
+                }
             }
             catch (Exception ex)
             {
+                if (stoppedDsh) await RestartAfterPluginOpAsync();
                 MessageBox.Show(Loc.T("notify.uninstallFail", "?", ex.Message), Loc.T("app.name"), MessageBoxButton.OK, MessageBoxImage.Error);
             }
+        }
+
+        /// <summary>
+        /// 插件安装/卸载中途失败（或异常）后把 dsh 重新拉起，恢复用户原有的运行状态。
+        /// 重启失败由 StartCoreAsync 自行提示，不影响调用方紧接着展示的原始错误。
+        /// </summary>
+        async Task RestartAfterPluginOpAsync()
+        {
+            TraceLog(Loc.T("notify.restarting"));
+            await StartCoreAsync(true);
         }
 
         void BtnOpenSettingsDir_Click(object sender, RoutedEventArgs e)
