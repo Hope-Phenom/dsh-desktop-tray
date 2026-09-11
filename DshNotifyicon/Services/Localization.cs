@@ -256,6 +256,7 @@ namespace DshNotifyicon.Services
             { "npm.pnpmInstallFail", new[] { "pnpm 已安装但未出现在 PATH 中。请重启应用后重试，或手动执行 npm install -g pnpm", "pnpm installed but not found on PATH. Restart the app and retry, or run npm install -g pnpm manually" } },
 
             { "dsh.alreadyRunning", new[] { "dsh 已在运行", "dsh is already running" } },
+            { "dsh.startCanceled", new[] { "已取消启动", "Start cancelled" } },
             { "dsh.starting", new[] { "启动: {0} {1}", "Starting: {0} {1}" } },
             { "dsh.startFail", new[] { "启动失败: {0}", "Start failed: {0}" } },
             { "dsh.exited", new[] { "dsh 进程意外退出（exit {0}）", "dsh exited unexpectedly (exit {0})" } },
@@ -263,7 +264,7 @@ namespace DshNotifyicon.Services
             { "dsh.urlParsed", new[] { "已解析 URL: {0}", "URL resolved: {0}" } },
             { "dsh.urlUnresolved", new[] { "未解析到 URL 且端口由 OS 分配，无法确认服务地址", "No URL was resolved and the port was OS-assigned; the service address cannot be confirmed" } },
             { "dsh.earlyExit", new[] { "dsh 进程提前退出，exit code {0}。查看上方日志定位原因（如端口占用）。", "dsh exited early with code {0}. See the log above for the reason (e.g. port in use)." } },
-            { "dsh.notReady", new[] { "服务在超时时间内未就绪（120s）。可能首次初始化 profile 较慢，可查看日志重试。", "The service did not become ready within the timeout (120s). First-run profile init may be slow; check the log and retry." } },
+            { "dsh.notReady", new[] { "服务在超时时间内未就绪（等待 URL {0}s，健康探测 {1}s）。若为首次初始化 profile，稍后重试即可；否则请查看上方日志。", "The service did not become ready in time (waited {0}s for the URL, then probed for {1}s). If this is the first profile init, retry shortly; otherwise check the log above." } },
             { "dsh.ready", new[] { "dsh 已就绪: {0}", "dsh ready: {0}" } },
             { "dsh.portBusy", new[] { "端口 {0} 已被占用，可能已有 dsh 或其他服务在运行", "Port {0} is already in use — another dsh or service may be running" } },
             { "dsh.externalFound", new[] { "检测到 {0} 个正在运行的 dsh 实例。双实例并发写同一数据目录可能损坏会话，请选择处理方式", "Found {0} running dsh instance(s). Two instances writing the same data directory concurrently may corrupt sessions — choose how to proceed" } },

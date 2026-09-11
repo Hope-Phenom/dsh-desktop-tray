@@ -643,16 +643,26 @@ namespace DshNotifyicon
         volatile bool _logQueued;
 
         /// <summary>
-        /// 日志追加（任意线程可调）。突发输出合并去重：跨线程时若已有待处理的追加则丢弃本次，
+        /// dsh 自身的输出：已由 DshProcessManager 落盘，这里只上界面，避免重复写日志。
+        /// </summary>
+        public void TraceDshLog(string line) { TraceLogCore(line, false); }
+
+        /// <summary>
+        /// 日志追加（任意线程可调）。托盘自身的操作输出（npm / 插件 / 体检 / 清理）同时落盘；
+        /// 界面部分突发输出合并去重：跨线程时若已有待处理的追加则丢弃本次，
         /// 防止安装/下载输出洪峰把 Dispatcher 队列塞爆导致界面卡死。
         /// </summary>
-        public void TraceLog(string line)
+        public void TraceLog(string line) { TraceLogCore(line, true); }
+
+        void TraceLogCore(string line, bool logToFile)
         {
+            // 落盘不受"窗口是否已加载""界面是否正在合并去重"影响，保证文件里一条不丢
+            if (logToFile) LogFile.Write(line);
             if (!Dispatcher.CheckAccess())
             {
                 if (_logQueued) return;
                 _logQueued = true;
-                try { Dispatcher.BeginInvoke(new Action(() => { _logQueued = false; TraceLog(line); })); }
+                try { Dispatcher.BeginInvoke(new Action(() => { _logQueued = false; TraceLogCore(line, false); })); }
                 catch { _logQueued = false; }
                 return;
             }
@@ -703,7 +713,8 @@ namespace DshNotifyicon
 
         public void OpenUiFromTray()
         {
-            var url = App.Services.Dsh.Url;
+            // 带令牌的入口优先：裸 URL 在没有会话 cookie 时会被 dsh 回 401
+            var url = App.Services.Dsh.BrowserUrl;
             if (string.IsNullOrEmpty(url))
             {
                 var s = App.Services.Settings;
@@ -717,7 +728,7 @@ namespace DshNotifyicon
 
         public void CopyUrlFromTray()
         {
-            var url = App.Services.Dsh.Url;
+            var url = App.Services.Dsh.BrowserUrl;
             if (string.IsNullOrEmpty(url))
             {
                 var s = App.Services.Settings;

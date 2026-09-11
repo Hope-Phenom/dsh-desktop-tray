@@ -41,6 +41,13 @@ namespace DshNotifyicon.Services
     {
         public DshState State { get { return _state; } }
         public string Url { get; private set; }
+        /// <summary>
+        /// dsh 打印的带启动令牌入口（http://127.0.0.1:端口/?token=…）。dsh web 的根路径需要该令牌换取
+        /// 会话 cookie，裸根路径会被回 401；未解析到令牌时为 null。
+        /// </summary>
+        public string AuthUrl { get; private set; }
+        /// <summary>浏览器入口：优先带令牌的 URL，回退到裸 URL，均无则为 null。</summary>
+        public string BrowserUrl { get { return AuthUrl ?? Url; } }
         public int? ProcessId { get; private set; }
 
         /// <summary>环形日志（最多 1000 行），主窗口打开时回填。</summary>
@@ -60,8 +67,22 @@ namespace DshNotifyicon.Services
         Process _proc;
         DshState _state = DshState.Idle;
         volatile bool _stoppingByUs;
+        /// <summary>用户在启动等待期间点了停止：让 URL/探测等待循环尽快退出。</summary>
+        volatile bool _cancelStart;
 
-        static readonly Regex UrlRx = new Regex(@"dsh web: http://127\.0\.0\.1:(\d+)", RegexOptions.Compiled);
+        /// <summary>
+        /// 等待 URL 输出行的上限。首次初始化 profile / 安装 bundle 可能要几分钟（升级 dsh 后
+        /// 第一次启动尤其明显），期间界面停在"启动中"，点停止可立即中止。
+        /// </summary>
+        const int UrlWaitSeconds = 300;
+        /// <summary>
+        /// URL 出现后的健康探测独立预算。刻意不与 URL 等待共用同一截止时间：
+        /// 首次初始化把 URL 预算耗尽时，共用截止时间会让探测一秒钟都跑不到就被误判为未就绪。
+        /// </summary>
+        const int ProbeSeconds = 60;
+
+        /// <summary>匹配 dsh 启动横幅：捕获裸 URL、端口、以及可选的启动令牌。</summary>
+        static readonly Regex UrlRx = new Regex(@"dsh web: (http://127\.0\.0\.1:(\d+)/?(?:\?token=([A-Za-z0-9_\-]+))?)", RegexOptions.Compiled);
 
         void SetState(DshState s)
         {
@@ -76,6 +97,7 @@ namespace DshNotifyicon.Services
                 RecentLog.Add(line);
                 if (RecentLog.Count > 1000) RecentLog.RemoveRange(0, RecentLog.Count - 1000);
             }
+            LogFile.Write(line); // 落盘（128 KB 滚动）；令牌已打码
             try { LogLine?.Invoke(line); } catch { } // 订阅者异常隔离
         }
 
@@ -165,8 +187,10 @@ namespace DshNotifyicon.Services
                 }
                 SetState(DshState.Starting);
                 Url = null;
+                AuthUrl = null;
                 ProcessId = null;
                 _stoppingByUs = false;
+                _cancelStart = false;
 
                 int actualPort = randomPort ? 0 : port;
                 var args = ProcessRunner.Quote(binJs) + " web --port " + actualPort;
@@ -177,7 +201,7 @@ namespace DshNotifyicon.Services
                 }
                 Log(Loc.T("dsh.starting", nodeExe, args));
 
-                var urlHolder = new string[1];
+                var urlHolder = new string[2]; // [0]=裸 URL，[1]=带令牌入口 URL
                 var exitedTcs = new TaskCompletionSource<bool>();
                 Process proc;
                 try
@@ -213,6 +237,7 @@ namespace DshNotifyicon.Services
                         var code = SafeExitCode(proc);
                         _proc = null;
                         Url = null;
+                        AuthUrl = null;
                         ProcessId = null;
                         SetState(DshState.Idle);
                         Log(Loc.T("dsh.exited", code));
@@ -221,30 +246,44 @@ namespace DshNotifyicon.Services
                 };
                 ProcessId = proc.Id;
 
-                // 1) 等 URL 输出行（loader settle 后才打印；冷启动可能较久，上限 120s）
-                var deadline = DateTime.UtcNow.AddSeconds(120);
-                while (DateTime.UtcNow < deadline && urlHolder[0] == null && !proc.HasExited)
+                // 1) 等 URL 输出行（loader settle 后才打印；冷启动可能较久，上限 300s，可随时点停止中止）
+                var urlWaitStart = DateTime.UtcNow;
+                var urlDeadline = urlWaitStart.AddSeconds(UrlWaitSeconds);
+                while (DateTime.UtcNow < urlDeadline && urlHolder[0] == null && !proc.HasExited && !_cancelStart)
                     await Task.Delay(250);
+                var urlWaitSeconds = (int)Math.Round((DateTime.UtcNow - urlWaitStart).TotalSeconds);
 
                 string url = urlHolder[0];
+                string authUrl = urlHolder[1];
                 int probePort = actualPort;
                 if (url != null)
                 {
-                    // urlHolder 存的是裸 URL（无 "dsh web: " 前缀），直接取尾部端口
-                    var pm = Regex.Match(url, @":(\d+)$");
+                    // urlHolder[0] 存的是裸 URL（无 "dsh web: " 前缀），直接取尾部端口
+                    var pm = Regex.Match(url, @":(\d+)/?$");
                     if (pm.Success) probePort = int.Parse(pm.Groups[1].Value);
                 }
 
-                // 2) 健康探测（URL 已解析则探测该端口；固定端口未解析则探测固定端口）
+                // 2) 健康探测（URL 已解析则探测该端口；固定端口未解析则探测固定端口），预算独立于 URL 等待
+                int probeSeconds = 0;
                 bool healthy = false;
                 if (probePort != 0)
                 {
                     if (url != null) Log(Loc.T("dsh.urlParsed", url));
-                    healthy = await ProbeHealthyAsync(probePort, deadline);
+                    var probeStart = DateTime.UtcNow;
+                    healthy = await ProbeHealthyAsync(authUrl ?? ("http://127.0.0.1:" + probePort + "/"),
+                        TimeSpan.FromSeconds(ProbeSeconds), proc, () => _cancelStart);
+                    probeSeconds = (int)Math.Round((DateTime.UtcNow - probeStart).TotalSeconds);
                 }
                 else
                 {
                     Log(Loc.T("dsh.urlUnresolved"));
+                }
+
+                if (_cancelStart)
+                {
+                    Log(Loc.T("dsh.startCanceled"));
+                    StopLocked();
+                    return false;
                 }
 
                 if (proc.HasExited && !healthy)
@@ -257,13 +296,14 @@ namespace DshNotifyicon.Services
                 }
                 if (!healthy)
                 {
-                    Log(Loc.T("dsh.notReady"));
+                    Log(Loc.T("dsh.notReady", urlWaitSeconds, probeSeconds));
                     StopLocked();
                     SetState(DshState.Error);
                     return false;
                 }
 
                 Url = url ?? ("http://127.0.0.1:" + probePort);
+                AuthUrl = authUrl;
                 SetState(DshState.Running);
                 Log(Loc.T("dsh.ready", Url));
                 try { Ready?.Invoke(Url); } catch { } // 订阅者异常隔离
@@ -275,9 +315,10 @@ namespace DshNotifyicon.Services
             }
         }
 
-        /// <summary>停止 dsh（杀进程树）。</summary>
+        /// <summary>停止 dsh（杀进程树）。启动等待期间调用会先请求中止，不会干等到超时。</summary>
         public async Task StopAsync()
         {
+            if (_state == DshState.Starting) _cancelStart = true;
             await _opLock.WaitAsync();
             try { StopLocked(); }
             finally { _opLock.Release(); }
@@ -290,6 +331,7 @@ namespace DshNotifyicon.Services
             {
                 _proc = null;
                 Url = null;
+                AuthUrl = null;
                 ProcessId = null;
                 if (_state != DshState.Idle) SetState(DshState.Idle);
                 return;
@@ -301,6 +343,7 @@ namespace DshNotifyicon.Services
             try { p.WaitForExit(5000); } catch { }
             _proc = null;
             Url = null;
+            AuthUrl = null;
             ProcessId = null;
             SetState(DshState.Idle);
             Log(Loc.T("dsh.stopped"));
@@ -318,7 +361,11 @@ namespace DshNotifyicon.Services
             if (urlHolder[0] == null)
             {
                 var m = UrlRx.Match(line);
-                if (m.Success) urlHolder[0] = "http://127.0.0.1:" + m.Groups[1].Value;
+                if (m.Success)
+                {
+                    urlHolder[0] = "http://127.0.0.1:" + m.Groups[2].Value;
+                    urlHolder[1] = m.Groups[1].Value; // 带 ?token= 的入口 URL（无令牌时即裸 URL）
+                }
             }
         }
 
@@ -327,20 +374,34 @@ namespace DshNotifyicon.Services
             try { return p.ExitCode; } catch { return -1; }
         }
 
-        static async Task<bool> ProbeHealthyAsync(int port, DateTime deadline)
+        /// <summary>
+        /// 健康探测：在预算内轮询 URL，只要 HTTP 层返回非 5xx 响应即视为已就绪。
+        /// 不能要求 2xx：dsh web 的根路径受启动令牌/会话 cookie 保护，不带凭证时固定回 401
+        /// （以及带令牌时的 303 换 cookie），两者都证明端口已监听、服务已装配完成。
+        /// 进程已退出或用户取消时立即返回，不空等预算。
+        /// </summary>
+        static async Task<bool> ProbeHealthyAsync(string probeUrl, TimeSpan budget, Process proc, Func<bool> canceled)
         {
-            using (var http = new HttpClient())
+            // 探测目标是本机回环地址，显式绕过系统代理，避免代理配置导致误判；
+            // 不跟随重定向（303 本身就是就绪信号），也不保留 cookie。
+            var handler = new HttpClientHandler { UseProxy = false, AllowAutoRedirect = false, UseCookies = false };
+            using (var http = new HttpClient(handler))
             {
                 http.Timeout = TimeSpan.FromSeconds(3);
+                var deadline = DateTime.UtcNow + budget;
                 while (DateTime.UtcNow < deadline)
                 {
+                    if (canceled != null && canceled()) return false;
+                    if (proc != null && proc.HasExited) return false; // 进程都没了，等端口没有意义
                     try
                     {
-                        var resp = await http.GetAsync("http://127.0.0.1:" + port + "/");
-                        if (resp.IsSuccessStatusCode) return true;
+                        using (var resp = await http.GetAsync(probeUrl))
+                        {
+                            if ((int)resp.StatusCode < 500) return true;
+                        }
                     }
-                    catch { }
-                    await Task.Delay(1000);
+                    catch { } // 连接被拒/超时：服务尚未监听，继续重试
+                    await Task.Delay(500);
                 }
                 return false;
             }

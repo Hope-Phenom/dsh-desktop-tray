@@ -52,6 +52,8 @@ namespace DshNotifyicon
                 return;
             }
             _showSignal = new EventWaitHandle(false, EventResetMode.AutoReset, SignalName);
+            // 每次启动写一条分隔行，把日志按运行场次切开
+            LogFile.Write("===== DshNotifyicon " + System.Reflection.Assembly.GetExecutingAssembly().GetName().Version + " 启动 =====");
             var watcher = new Thread(() =>
             {
                 while (_showSignal.WaitOne())
@@ -161,14 +163,16 @@ namespace DshNotifyicon
             {
                 Services.Tray.SetState(DshState.Running, url);
                 Services.Tray.ShowBalloon(Loc.T("app.startedTitle"), Loc.T("app.startedText", url));
-                if (Services.Settings.AutoOpenBrowser) Services.OpenUrl(url);
+                // 打开浏览器要用带启动令牌的入口：dsh web 的裸根路径没有会话 cookie 时回 401
+                if (Services.Settings.AutoOpenBrowser) Services.OpenUrl(Services.Dsh.BrowserUrl ?? url);
             };
             Services.Dsh.Exited += info =>
             {
                 Services.Tray.SetState(DshState.Idle, null);
                 Services.Tray.ShowBalloon(Loc.T("app.exitedTitle"), info);
             };
-            Services.Dsh.LogLine += line => Services.Main.TraceLog(line);
+            // dsh 输出已由 DshProcessManager 落盘，这里只送界面（TraceDshLog 不重复写文件）
+            Services.Dsh.LogLine += line => Services.Main.TraceDshLog(line);
             Services.Dsh.Notification += OnDshNotification;
         }
 
