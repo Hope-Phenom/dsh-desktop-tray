@@ -1189,7 +1189,9 @@ namespace DshNotifyicon
                 }
             }
 
-            // 3) 已无任何真实内容时恢复模板占位符 []
+            // 3) 已无任何真实内容时补回空列表占位符 []
+            //    只补占位符，绝不丢弃用户已有的注释与排版：注释是 profile 模板的说明文字，
+            //    早期实现用 lines.Clear() 会连注释一起清掉，把模板头部说明永久丢失。
             bool hasContent = false;
             foreach (var line in lines)
             {
@@ -1198,7 +1200,8 @@ namespace DshNotifyicon
             }
             if (!hasContent)
             {
-                lines.Clear();
+                while (lines.Count > 0 && lines[lines.Count - 1].Trim().Length == 0) lines.RemoveAt(lines.Count - 1);
+                if (lines.Count > 0) lines.Add("");
                 lines.Add("[]");
             }
 
