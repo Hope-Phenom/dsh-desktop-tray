@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Net.Http;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Win32;
@@ -17,6 +18,80 @@ namespace DshNotifyicon.Services
         public string NpmVersion;
         /// <summary>npm-cli.js 完整路径（node 直调 npm 用）。</summary>
         public string NpmCliJs;
+    }
+
+    /// <summary>
+    /// 路径段体检。要点：.NET Framework 的 Path.Combine / Path.GetDirectoryName 会校验非法路径
+    /// 字符（" &lt; &gt; | 与 0x00-0x1F），而 File.Exists / Directory.Exists 不校验。
+    /// 于是 PATH 里只要有一段脏数据（安装器写入的带引号条目、手改 PATH 留下的控制字符……），
+    /// Path.Combine(dir, "node.exe") 就会抛 ArgumentException("路径中具有非法字符。")：
+    /// 因为异常发生在 DshProcessManager 第一条日志之前，日志里只剩启动横幅，
+    /// 界面上表现为"启动失败/检查失败: 路径中具有非法字符。"，工具整体不可用。
+    /// 数字、空格、中文都不在非法字符集内，所以纯数字用户名本身无害。
+    /// 结论：所有来自 PATH / 环境变量的路径段，动手拼路径前必须先过这里。
+    /// </summary>
+    public static class PathGuard
+    {
+        static readonly char[] Invalid = Path.GetInvalidPathChars();
+
+        /// <summary>该路径段不含 .NET 非法路径字符（空段返回 false，调用方按"跳过"处理）。</summary>
+        public static bool IsSafe(string segment)
+        {
+            return !string.IsNullOrEmpty(segment) && segment.IndexOfAny(Invalid) < 0;
+        }
+
+        /// <summary>
+        /// 去掉环境变量值外层可能存在的成对引号。setx DSH_HOME "\"D:\dsh\"" 这类写法会把引号
+        /// 一起写进值里，直接拿去拼路径必然触发"路径中具有非法字符。"。
+        /// </summary>
+        public static string StripQuotes(string value)
+        {
+            var v = (value ?? "").Trim();
+            if (v.Length >= 2 && v[0] == '"')
+            {
+                var end = v.IndexOf('"', 1);
+                if (end > 1) return v.Substring(1, end - 1).Trim();
+            }
+            return v;
+        }
+
+        /// <summary>控制字符渲染成 &lt;0x0A&gt; 形式，否则在日志/界面里根本看不见。</summary>
+        public static string Describe(string segment)
+        {
+            var sb = new StringBuilder();
+            foreach (var c in segment ?? "")
+            {
+                if (c < 0x20) sb.Append("<0x" + ((int)c).ToString("X2") + ">");
+                else sb.Append(c);
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// 列出含非法字符的 PATH 条目。按 HKCU → HKLM → 当前进程取值，展开环境变量后去重，
+        /// 便于体检直接点名问题出在哪一层（只读注册表，不需要管理员）。
+        /// </summary>
+        public static List<string> UnsafeSegments()
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var list = new List<string>();
+            Add(seen, list, "HKCU", Environment.GetEnvironmentVariable("Path", EnvironmentVariableTarget.User));
+            Add(seen, list, "HKLM", Environment.GetEnvironmentVariable("Path", EnvironmentVariableTarget.Machine));
+            Add(seen, list, "ENV", Environment.GetEnvironmentVariable("Path"));
+            return list;
+        }
+
+        static void Add(HashSet<string> seen, List<string> list, string scope, string pathEnv)
+        {
+            if (string.IsNullOrEmpty(pathEnv)) return;
+            foreach (var seg in pathEnv.Split(';'))
+            {
+                if (seg.Trim().Length == 0) continue; // 结尾分号等空段不算问题
+                var expanded = Environment.ExpandEnvironmentVariables(seg.Trim());
+                if (IsSafe(expanded)) continue;
+                if (seen.Add(expanded)) list.Add("[" + scope + "] " + Describe(expanded));
+            }
+        }
     }
 
     /// <summary>
@@ -37,7 +112,9 @@ namespace DshNotifyicon.Services
                 foreach (var seg in v.Split(';'))
                 {
                     var s = seg.Trim();
-                    if (s.Length > 0) parts.Add(s);
+                    // 含 .NET 非法路径字符的脏段一律丢弃：它既不可能解析出可执行文件，
+                    // 又会让后续 Path.Combine 直接抛"路径中具有非法字符。"（详见 PathGuard）
+                    if (s.Length > 0 && PathGuard.IsSafe(s)) parts.Add(s);
                 }
             };
             try
@@ -72,13 +149,18 @@ namespace DshNotifyicon.Services
             var info = new NodeInfo();
             var candidates = new List<string>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            Action<string> addCand = (p) => { if (!string.IsNullOrEmpty(p) && seen.Add(p)) candidates.Add(p); };
-            if (!string.IsNullOrEmpty(nodeExeOverride)) addCand(nodeExeOverride);
-            AddFromPath(envPath, addCand);
-            AddFromPath(Environment.GetEnvironmentVariable("Path"), addCand);
-            addCand(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs", "node.exe"));
-            addCand(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "nodejs", "node.exe"));
-            addCand(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "nvm", "node.exe"));
+            // 脏候选（含非法路径字符）在这里就被挡掉：拼路径前过滤，而不是等 Path.Combine 抛异常
+            Action<string> addCand = (p) => { if (PathGuard.IsSafe(p) && seen.Add(p)) candidates.Add(p); };
+            try
+            {
+                if (!string.IsNullOrEmpty(nodeExeOverride)) addCand(nodeExeOverride);
+                AddFromPath(envPath, addCand);
+                AddFromPath(Environment.GetEnvironmentVariable("Path"), addCand);
+                addCand(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs", "node.exe"));
+                addCand(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "nodejs", "node.exe"));
+                addCand(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "nvm", "node.exe"));
+            }
+            catch { } // 兜底：候选路径构建绝不阻断检测（脏段已被 PathGuard 过滤）
 
             string nodeExe = null;
             foreach (var c in candidates)
@@ -88,8 +170,12 @@ namespace DshNotifyicon.Services
             if (nodeExe == null) return info;
             info.NodeExe = nodeExe;
 
-            var npmCli = Path.Combine(Path.GetDirectoryName(nodeExe), "node_modules", "npm", "bin", "npm-cli.js");
-            if (File.Exists(npmCli)) info.NpmCliJs = npmCli;
+            try
+            {
+                var npmCli = Path.Combine(Path.GetDirectoryName(nodeExe), "node_modules", "npm", "bin", "npm-cli.js");
+                if (File.Exists(npmCli)) info.NpmCliJs = npmCli;
+            }
+            catch { } // GetDirectoryName 同样校验非法字符：拿不到 npm-cli.js 也不该中断检测
 
             try
             {
@@ -123,6 +209,9 @@ namespace DshNotifyicon.Services
             {
                 var dir = seg.Trim();
                 if (dir.Length == 0) continue;
+                // 必须先过滤再 Path.Combine：脏段会让 Combine 抛"路径中具有非法字符。"，
+                // 这条链上没有任何 catch，一路冒到界面的"启动失败/检查失败"弹窗。
+                if (!PathGuard.IsSafe(dir)) continue;
                 addCand(Path.Combine(dir, "node.exe"));
             }
         }

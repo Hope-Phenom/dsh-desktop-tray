@@ -54,6 +54,7 @@ namespace DshNotifyicon
             tabAbout.Header = Loc.T("tab.about");
 
             btnCheck.Content = Loc.T("env.check");
+            gbPath.Header = Loc.T("env.pathGroup");
             gbNode.Header = Loc.T("env.nodeGroup");
             btnInstallNode.Content = Loc.T("env.installNode");
             gbMirror.Header = Loc.T("env.mirrorGroup");
@@ -252,6 +253,9 @@ namespace DshNotifyicon
                 var detail = item.Detail;
                 switch (item.Name)
                 {
+                    case "PATH":
+                        txtPath.Text = StatusPrefix(item.Status) + detail;
+                        break;
                     case "Node.js":
                         txtNode.Text = StatusPrefix(item.Status) + detail;
                         btnInstallNode.Visibility = item.Status == EnvStatus.Missing ? Visibility.Visible : Visibility.Collapsed;
@@ -568,6 +572,10 @@ namespace DshNotifyicon
             }
             catch (Exception ex)
             {
+                // 启动链路上的失败（典型：PATH 脏段让 Path.Combine 抛"路径中具有非法字符。"）
+                // 发生在 DshProcessManager 写第一条日志之前；不在这里落盘的话日志里只剩启动横幅，
+                // 用户拿不到任何线索。这里把完整异常（含堆栈）写进日志与界面日志面板。
+                TraceLog(Loc.T("svc.startFailed", ex.ToString()));
                 Ask(Loc.T("svc.startFailed", ex.Message), MessageBoxButton.OK, MessageBoxImage.Error);
                 return false;
             }
@@ -1037,12 +1045,26 @@ namespace DshNotifyicon
         /// <summary>cordis.patch.yml 路径（DSH_HOME 未设置时回落 %USERPROFILE%\.dsh）；createDir 为 true 时确保 profile 目录存在。</summary>
         static string NotifyPatchPath(bool createDir)
         {
-            var home = Environment.GetEnvironmentVariable("DSH_HOME");
-            if (string.IsNullOrEmpty(home))
-                home = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dsh");
-            var profileDir = Path.Combine(home, "profiles", "web");
+            var profileDir = Path.Combine(ResolveDshHome(), "profiles", "web");
             if (createDir && !Directory.Exists(profileDir)) Directory.CreateDirectory(profileDir);
             return Path.Combine(profileDir, "cordis.patch.yml");
+        }
+
+        /// <summary>
+        /// dsh 数据目录：优先 DSH_HOME，回落 %USERPROFILE%\.dsh。
+        /// DSH_HOME 常被写成带引号的形式（setx DSH_HOME "\"D:\dsh\""），引号会被一起写进值里，
+        /// 随后 Path.Combine / Directory.CreateDirectory / Directory.Move 都会抛
+        /// "路径中具有非法字符。"——这里先去引号，仍非法就抛出可读的错误（含实际取值与位置）。
+        /// </summary>
+        static string ResolveDshHome()
+        {
+            var home = Environment.GetEnvironmentVariable("DSH_HOME");
+            if (string.IsNullOrEmpty(home))
+                return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dsh");
+            var cleaned = PathGuard.StripQuotes(home);
+            if (!PathGuard.IsSafe(cleaned))
+                throw new InvalidOperationException(Loc.T("dsh.homeInvalid", PathGuard.Describe(cleaned)));
+            return cleaned;
         }
 
         /// <summary>读取 patch 文件全部行；raw 为原始文本（文件不存在时为 null），用于判断是否真的需要写回。</summary>
@@ -1345,10 +1367,8 @@ namespace DshNotifyicon
                 await NpmService.UninstallDshAsync(App.Services.EnvPath, log, ct);
                 log(Loc.T("cleanup.uninstallDone"));
 
-                // 3. 数据目录改名备份（尊重 DSH_HOME 覆盖）
-                var home = Environment.GetEnvironmentVariable("DSH_HOME");
-                if (string.IsNullOrEmpty(home))
-                    home = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dsh");
+                // 3. 数据目录改名备份（尊重 DSH_HOME 覆盖；非法取值由 ResolveDshHome 给出可读错误）
+                var home = ResolveDshHome();
                 if (System.IO.Directory.Exists(home))
                 {
                     var bak = home + ".bak-" + DateTime.Now.ToString("yyyyMMdd-HHmmss");

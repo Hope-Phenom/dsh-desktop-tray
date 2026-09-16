@@ -28,6 +28,20 @@ namespace DshNotifyicon.Services
             {
                 var ct = cts.Token;
 
+                // PATH 体检（纯本地、必须最先跑）：.NET Framework 的 Path.Combine 会拒绝非法路径
+                // 字符，PATH 里一段脏数据就足以让 Node/pnpm 检测与 dsh 启动全部失败。先点名问题条目，
+                // 后面的检测才有意义（脏段已在 NodeService.RefreshPath 里被丢弃，不会再抛异常）。
+                log?.Invoke(Loc.T("ec.checkingPath"));
+                var badSegments = PathGuard.UnsafeSegments();
+                items.Add(new EnvItem
+                {
+                    Name = "PATH",
+                    Status = badSegments.Count == 0 ? EnvStatus.Ok : EnvStatus.Error,
+                    Detail = badSegments.Count == 0
+                        ? Loc.T("ec.pathOk")
+                        : Loc.T("ec.pathBad", badSegments.Count, string.Join("\n", badSegments))
+                });
+
                 // Node.js
                 log?.Invoke(Loc.T("ec.checkingNode"));
                 try

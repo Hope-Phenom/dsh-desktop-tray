@@ -137,7 +137,8 @@ namespace DshNotifyicon.Services
         {
             try
             {
-                var prefix = (await GetGlobalPrefixAsync(envPath, ct)).Trim();
+                // npm 输出可能带引号/换行，先去引号再拼路径（Path.Combine 会拒绝非法字符）
+                var prefix = PathGuard.StripQuotes((await GetGlobalPrefixAsync(envPath, ct)).Trim());
                 var pkg = Path.Combine(prefix, "node_modules", "@deepseek-ai", "dsh", "package.json");
                 if (File.Exists(pkg))
                 {
@@ -187,7 +188,7 @@ namespace DshNotifyicon.Services
         {
             try
             {
-                var prefix = (await GetGlobalPrefixAsync(envPath)).Trim();
+                var prefix = PathGuard.StripQuotes((await GetGlobalPrefixAsync(envPath)).Trim());
                 var p = Path.Combine(prefix, "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js");
                 return File.Exists(p) ? p : null;
             }
@@ -202,6 +203,9 @@ namespace DshNotifyicon.Services
             {
                 var dir = seg.Trim();
                 if (dir.Length == 0) continue;
+                // 与 NodeService.AddFromPath 同理：脏段既找不出 pnpm，又会让 Path.Combine 抛异常，
+                // 而这里没有 catch —— 一条坏 PATH 就能让整个"一键体检"直接失败。
+                if (!PathGuard.IsSafe(dir)) continue;
                 foreach (var ext in exts)
                 {
                     var p = Path.Combine(dir, "pnpm" + ext);

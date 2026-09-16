@@ -22,6 +22,12 @@
                     </StackPanel>
                     <ProgressBar x:Name="prgOp" Height="6" Margin="0,10,0,0" IsIndeterminate="True" Visibility="Collapsed"/>
 
+                    <GroupBox x:Name="gbPath" Header="PATH 环境变量（Node / pnpm / dsh 检测的前提）" Margin="0,12,0,0">
+                        <StackPanel>
+                            <TextBlock x:Name="txtPath" TextWrapping="Wrap"/>
+                        </StackPanel>
+                    </GroupBox>
+
                     <GroupBox x:Name="gbNode" Header="Node.js 运行环境" Margin="0,12,0,0">
                         <StackPanel>
                             <TextBlock x:Name="txtNode" TextWrapping="Wrap"/>
