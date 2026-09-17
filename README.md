@@ -82,6 +82,7 @@ NuGet dependencies: `Hardcodet.NotifyIcon.Wpf` (tray), `Newtonsoft.Json` (settin
 
 1. **First launch**: the main window is shown; afterwards it hides to the tray by default (changeable via "Show main window on startup" in Settings).
 2. **Environment tab → Health Check**: see Node.js / npm mirror / dsh status; click the button of any missing item to fix it.
+   If Node.js or pnpm lives outside PATH (portable build, nvm, custom install dir), use **Specify path…** in that group: enter the full path to the executable or just the folder containing it; empty = auto-detect. An invalid path falls back to auto-detection and the item says so explicitly.
 3. **Service tab**: set the port (or tick random port) → **Start DSH** → the browser opens the Web UI automatically.
 4. **Tray**: day-to-day operations live here — the icon gains a green dot while running; hover to see the current URL.
 5. **UI Language** (optional): follows the system by default; switch to 中文 / English anytime from the "UI Language" dropdown in Settings — takes effect immediately.
@@ -169,12 +170,13 @@ DshNotifyicon/
 │  ├─ App.xaml(.cs)          Single instance, tray lifecycle, --smoke mode, event wiring, applies UI language at startup
 │  ├─ MainWindow.xaml(.cs)   Environment / Service / Settings / Notification Enhancements / About tabs; refreshes all static texts on language switch
 │  ├─ TrayIcon.cs            Tray icon & menu (built in code with Hardcodet; texts refresh with the language)
+│  ├─ PathPickerDialog.cs    "Specify path…" input dialog (shared by Node / pnpm; built in code)
 │  ├─ AppServices.cs         Service container: settings / DSH process / main window / tray
 │  ├─ Services/
 │  │  ├─ Settings.cs         Settings model (incl. Language field & notification settings) & atomic persistence
 │  │  ├─ Localization.cs     CN/EN string table, auto-detection & language switching (Loc.T / Loc.Changed)
 │  │  ├─ ProcessRunner.cs    Hidden process execution, separated stdout/stderr, timeout, process-tree kill
-│  │  ├─ NodeService.cs      Node.js detection / winget+MSI install / PATH refresh
+│  │  ├─ NodeService.cs      Node.js detection (incl. manual path override) / winget+MSI install / PATH refresh
 │  │  ├─ NpmService.cs       npm wrapper (@latest, per-command --registry, serialized queue, semver)
 │  │  ├─ DshProcessManager.cs  State machine, preflight, URL parsing, health probe, start/stop, DSH_NOTIFY parsing
 │  │  ├─ DshCapabilities.cs  Version lookup & web-CLI capability rules for the installed dsh (--no-open gating)

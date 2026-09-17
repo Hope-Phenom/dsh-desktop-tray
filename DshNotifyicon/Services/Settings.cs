@@ -33,8 +33,17 @@ namespace DshNotifyicon.Services
         /// <summary>trusted-host 列表（逗号/分号分隔，可重复传给 dsh）。</summary>
         public string TrustedHosts = "";
 
-        /// <summary>用户手动指定的 node.exe 路径（留空自动检测）。</summary>
+        /// <summary>
+        /// 用户手动指定的 Node.js 位置：node.exe 完整路径或其所在目录（留空自动检测）。
+        /// 在环境页指定；无效时体检会点名并回退自动检测。
+        /// </summary>
         public string NodePath = "";
+
+        /// <summary>
+        /// 用户手动指定的 pnpm 位置：pnpm.exe / pnpm.cmd 完整路径或其所在目录（留空自动检测）。
+        /// 命中时该目录会被前置进子进程 PATH，dsh 插件内部的 spawnSync("pnpm") 才能用上它。
+        /// </summary>
+        public string PnpmPath = "";
 
         /// <summary>界面语言：auto = 跟随系统；zh / en = 手动指定。</summary>
         public string Language = "auto";

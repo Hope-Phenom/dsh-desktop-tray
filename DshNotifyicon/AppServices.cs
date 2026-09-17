@@ -24,16 +24,24 @@ namespace DshNotifyicon
         public AppServices(Settings settings)
         {
             Settings = settings;
+            // NpmService 等拿不到设置对象的地方，靠这个引用取"手动指定路径"。
+            // 持有活对象而非副本：用户在环境页改完立刻生效，不会留下过期值。
+            ToolPathOverrides.Current = settings;
             Main = new MainWindow();
         }
 
-        /// <summary>刷新后的 PATH（合并注册表，安装 Node 后重新获取）。</summary>
+        /// <summary>刷新后的 PATH + 手动指定的 node/pnpm 目录（前置，对所有子进程可见）。</summary>
         public string EnvPath
         {
-            get { return _envPath ?? (_envPath = NodeService.RefreshPath()); }
+            get { return _envPath ?? (_envPath = BuildEnvPath()); }
         }
 
-        public void RefreshEnvPath() { _envPath = NodeService.RefreshPath(); }
+        public void RefreshEnvPath() { _envPath = BuildEnvPath(); }
+
+        static string BuildEnvPath()
+        {
+            return NodeService.WithToolOverrides(NodeService.RefreshPath(), ToolPathOverrides.Node, ToolPathOverrides.Pnpm);
+        }
 
         /// <summary>解析 dsh bin.js 路径（缓存）。未安装返回 null。</summary>
         public async Task<string> DshBinJsAsync()

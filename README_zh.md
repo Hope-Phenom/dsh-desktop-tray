@@ -82,6 +82,7 @@ NuGet 依赖：`Hardcodet.NotifyIcon.Wpf`（托盘）、`Newtonsoft.Json`（设�
 
 1. **首次启动**：显示主窗口；之后默认隐藏到托盘（设置页可改"启动时显示主窗口"）。
 2. **环境页 → 一键体检**：查看 Node.js / npm 镜像 / dsh 三项状态；缺失项点击对应按钮一键修复。
+   若 Node.js 或 pnpm 装在非 PATH 目录（绿色版、nvm、自定义安装位置），点该分组的 **指定路径…** 手动指定：可填可执行文件完整路径，也可只填它所在的目录；留空 = 自动检测。填的路径无效时会回退自动检测，并在该项结果里注明"手动指定的路径无效"。
 3. **服务页**：设置端口（或勾选随机端口）→ **启动 DSH** → 自动打开浏览器进入 Web UI。
 4. **托盘**：日常操作都在这里——启动后状态图标变为绿点，悬停可看当前 URL。
 5. **界面语言**（可选）：默认自动跟随系统；在设置页"界面语言"下拉中选择 中文 / English 可随时切换，立即生效。
@@ -169,12 +170,13 @@ DshNotifyicon/
 │  ├─ App.xaml(.cs)          单实例、托盘生命周期、--smoke 模式、事件接线、启动时应用界面语言
 │  ├─ MainWindow.xaml(.cs)   环境 / 服务 / 设置 / 通知增强 / 关于 五页；语言切换时刷新全部静态文案
 │  ├─ TrayIcon.cs            托盘图标与菜单（Hardcodet 代码构建；文案随语言刷新）
+│  ├─ PathPickerDialog.cs    环境页「指定路径…」输入窗（Node / pnpm 复用，代码构建）
 │  ├─ AppServices.cs         服务容器：设置 / DSH 进程 / 主窗口 / 托盘
 │  ├─ Services/
 │  │  ├─ Settings.cs         设置模型（含 Language 字段与通知设置）与原子持久化
 │  │  ├─ Localization.cs     中英文文案表、自动识别与语言切换（Loc.T / Loc.Changed）
 │  │  ├─ ProcessRunner.cs    隐藏进程执行、stdout/stderr 分离、超时、进程树杀
-│  │  ├─ NodeService.cs      Node.js 检测 / winget+MSI 安装 / PATH 刷新
+│  │  ├─ NodeService.cs      Node.js 检测（含手动指定路径）/ winget+MSI 安装 / PATH 刷新
 │  │  ├─ NpmService.cs       npm 封装（@latest、--registry 单次源、串行队列、semver）
 │  │  ├─ DshProcessManager.cs  状态机、前置检查、URL 解析、健康探测、启停、DSH_NOTIFY 解析
 │  │  ├─ DshCapabilities.cs  已安装 dsh 的版本读取与 Web CLI 能力判定（--no-open 门控）

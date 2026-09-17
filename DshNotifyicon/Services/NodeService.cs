@@ -18,6 +18,8 @@ namespace DshNotifyicon.Services
         public string NpmVersion;
         /// <summary>npm-cli.js 完整路径（node 直调 npm 用）。</summary>
         public string NpmCliJs;
+        /// <summary>用户手动指定了路径但解析不到（此时 NodeExe 来自自动检测，界面需点名说明）。</summary>
+        public bool OverrideInvalid;
     }
 
     /// <summary>
@@ -95,6 +97,58 @@ namespace DshNotifyicon.Services
     }
 
     /// <summary>
+    /// "手动指定位置"的路径解析。输入既可以是可执行文件本身，也可以是它所在的目录
+    /// （用户往往直接把安装目录粘进来）。解析不到——空输入、路径不存在、含非法字符、
+    /// 目录里没有候选文件——一律返回 null，由调用方决定回退自动检测并在界面上点名，
+    /// 这里绝不抛异常。
+    /// </summary>
+    public static class ToolPath
+    {
+        /// <summary>
+        /// 解析手动指定的路径，fileNames 按优先级排列（如 pnpm.exe → pnpm.cmd）。
+        /// 返回命中文件的完整路径；未指定或无效返回 null。
+        /// </summary>
+        public static string Resolve(string input, params string[] fileNames)
+        {
+            var v = PathGuard.StripQuotes(input);
+            if (v.Length == 0 || !PathGuard.IsSafe(v)) return null;
+            try
+            {
+                if (Directory.Exists(v))
+                {
+                    foreach (var name in fileNames)
+                    {
+                        var p = Path.Combine(v, name);
+                        if (File.Exists(p)) return p;
+                    }
+                    return null; // 目录存在但没有候选可执行文件 → 同样算无效
+                }
+                return File.Exists(v) ? v : null;
+            }
+            catch { return null; } // 非法字符等：Path.Combine 会抛，视为无效
+        }
+
+        /// <summary>是否"指定了但无效"（空输入 = 未指定，不算无效）。</summary>
+        public static bool IsInvalid(string input, string resolved)
+        {
+            return resolved == null && PathGuard.StripQuotes(input).Length > 0;
+        }
+    }
+
+    /// <summary>
+    /// 当前生效的"手动指定路径"。持有活的 Settings 引用而不是复制字段值：
+    /// 用户在环境页改完立刻生效，不会留下过期副本。由 AppServices 构造时注入；
+    /// --smoke 等没有设置对象的场景保持 null = 全部自动检测。
+    /// </summary>
+    public static class ToolPathOverrides
+    {
+        public static Settings Current;
+
+        public static string Node { get { return Current == null ? "" : Current.NodePath; } }
+        public static string Pnpm { get { return Current == null ? "" : Current.PnpmPath; } }
+    }
+
+    /// <summary>
     /// Node.js 运行环境：检测（PATH + 常见路径兜底）、winget/MSI 一键安装、PATH 刷新。
     /// </summary>
     public static class NodeService
@@ -141,8 +195,34 @@ namespace DshNotifyicon.Services
         }
 
         /// <summary>
-        /// 检测 node/npm：优先扫描刷新后的 PATH（envPath，Node 安装后立即生效），
-        /// 再扫当前进程 PATH 与常见安装路径；读取版本。
+        /// 把手动指定的 node / pnpm 所在目录前置到 PATH 首部，让所有子进程（npm、dsh 主进程、
+        /// 以及 dsh 插件内部的 spawnSync("pnpm")）都看得见用户指定的那一份工具。
+        /// 指定的路径无效时不动 PATH —— 体检负责把这种情况点名，而不是悄悄拿别处的工具顶上。
+        /// </summary>
+        public static string WithToolOverrides(string envPath, string nodePath, string pnpmPath)
+        {
+            var dirs = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            Action<string> addDir = (exe) =>
+            {
+                if (exe == null) return;
+                try
+                {
+                    var dir = Path.GetDirectoryName(exe);
+                    if (!string.IsNullOrEmpty(dir) && seen.Add(dir)) dirs.Add(dir);
+                }
+                catch { } // GetDirectoryName 会校验非法字符：拿不到目录就当没指定
+            };
+            addDir(ToolPath.Resolve(nodePath, "node.exe"));
+            addDir(ToolPath.Resolve(pnpmPath, "pnpm.exe", "pnpm.cmd"));
+            if (dirs.Count == 0) return envPath;
+            return string.Join(";", dirs) + ";" + (envPath ?? "");
+        }
+
+        /// <summary>
+        /// 检测 node/npm：手动指定优先（node.exe 或其所在目录都接受，无效则记 OverrideInvalid
+        /// 并回退），再扫描刷新后的 PATH（envPath，Node 安装后立即生效），
+        /// 最后扫当前进程 PATH 与常见安装路径；读取版本。
         /// </summary>
         public static async Task<NodeInfo> DetectAsync(string nodeExeOverride = null, string envPath = null)
         {
@@ -153,7 +233,9 @@ namespace DshNotifyicon.Services
             Action<string> addCand = (p) => { if (PathGuard.IsSafe(p) && seen.Add(p)) candidates.Add(p); };
             try
             {
-                if (!string.IsNullOrEmpty(nodeExeOverride)) addCand(nodeExeOverride);
+                var overrideExe = ToolPath.Resolve(nodeExeOverride, "node.exe");
+                info.OverrideInvalid = ToolPath.IsInvalid(nodeExeOverride, overrideExe);
+                addCand(overrideExe);
                 AddFromPath(envPath, addCand);
                 AddFromPath(Environment.GetEnvironmentVariable("Path"), addCand);
                 addCand(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs", "node.exe"));

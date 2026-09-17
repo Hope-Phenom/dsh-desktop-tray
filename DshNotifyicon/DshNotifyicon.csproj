@@ -73,6 +73,7 @@
       <DependentUpon>MainWindow.xaml</DependentUpon>
       <SubType>Code</SubType>
     </Compile>
+    <Compile Include="PathPickerDialog.cs" />
     <Compile Include="TrayIcon.cs" />
     <Compile Include="AppServices.cs" />
     <Compile Include="Services\Settings.cs" />

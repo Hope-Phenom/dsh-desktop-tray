@@ -47,9 +47,12 @@ namespace DshNotifyicon.Services
                 try
                 {
                     var node = await NodeService.DetectAsync(settings.NodePath, envPath);
+                    // 手动指定的路径无效时不能闷着回退：那样界面看起来一切正常，
+                    // 用户却以为"我指定的那个 node 正在被使用"。
+                    var hint = node.OverrideInvalid ? "\n" + Loc.T("ec.overrideFallback", settings.NodePath) : "";
                     if (node.NodeExe == null)
                     {
-                        items.Add(new EnvItem { Name = "Node.js", Status = EnvStatus.Missing, Detail = Loc.T("ec.nodeMissing") });
+                        items.Add(new EnvItem { Name = "Node.js", Status = EnvStatus.Missing, Detail = Loc.T("ec.nodeMissing") + hint });
                     }
                     else
                     {
@@ -57,7 +60,7 @@ namespace DshNotifyicon.Services
                         {
                             Name = "Node.js",
                             Status = EnvStatus.Ok,
-                            Detail = "node " + (node.NodeVersion ?? "?") + " / npm " + (node.NpmVersion ?? "?") + "  @ " + node.NodeExe
+                            Detail = "node " + (node.NodeVersion ?? "?") + " / npm " + (node.NpmVersion ?? "?") + "  @ " + node.NodeExe + hint
                         });
                     }
                 }
@@ -87,10 +90,16 @@ namespace DshNotifyicon.Services
 
                 // pnpm（dsh 插件管理必需，纯本地检查）
                 log?.Invoke(Loc.T("ec.checkingPnpm"));
-                var pnpmPath = NpmService.FindPnpm(envPath);
-                items.Add(pnpmPath == null
-                    ? new EnvItem { Name = "pnpm", Status = EnvStatus.Missing, Detail = Loc.T("ec.pnpmMissing") }
-                    : new EnvItem { Name = "pnpm", Status = EnvStatus.Ok, Detail = Loc.T("ec.pnpmOk", pnpmPath) });
+                var pnpm = NpmService.FindPnpm(envPath, settings.PnpmPath);
+                var pnpmHint = pnpm.OverrideInvalid ? "\n" + Loc.T("ec.overrideFallback", settings.PnpmPath) : "";
+                if (pnpm.Path == null)
+                {
+                    items.Add(new EnvItem { Name = "pnpm", Status = EnvStatus.Missing, Detail = Loc.T("ec.pnpmMissing") + pnpmHint });
+                }
+                else
+                {
+                    items.Add(new EnvItem { Name = "pnpm", Status = EnvStatus.Ok, Detail = Loc.T("ec.pnpmOk", pnpm.Path) + pnpmHint });
+                }
 
                 // dsh 本地版本（无网络）
                 log?.Invoke(Loc.T("ec.checkingDsh"));

@@ -57,6 +57,7 @@ namespace DshNotifyicon
             gbPath.Header = Loc.T("env.pathGroup");
             gbNode.Header = Loc.T("env.nodeGroup");
             btnInstallNode.Content = Loc.T("env.installNode");
+            btnPickNode.Content = Loc.T("env.pickNode");
             gbMirror.Header = Loc.T("env.mirrorGroup");
             SetComboItem(cmbMirror, 0, Loc.T("env.mirrorDefault"));
             SetComboItem(cmbMirror, 1, Loc.T("env.mirrorNpmmirror"));
@@ -69,6 +70,7 @@ namespace DshNotifyicon
             btnCheckUpdate.Content = Loc.T("env.checkUpdate");
             gbPnpm.Header = Loc.T("env.pnpmGroup");
             btnInstallPnpm.Content = Loc.T("env.installPnpm");
+            btnPickPnpm.Content = Loc.T("env.pickPnpm");
 
             lblPort.Text = Loc.T("svc.port");
             chkRandomPort.Content = Loc.T("svc.randomPort");
@@ -96,7 +98,7 @@ namespace DshNotifyicon
             lblDoubleClickHint.Text = Loc.T("set.doubleClickHint");
             gbAdvanced.Header = Loc.T("set.advanced");
             lblTrusted.Text = Loc.T("set.trustedHosts");
-            lblNodePath.Text = Loc.T("set.nodePath");
+            lblNodePathHint.Text = Loc.T("set.toolPathHint");
             gbCleanup.Header = Loc.T("set.cleanup");
             lblCleanupDesc.Text = Loc.T("set.cleanupDesc");
             btnCleanup.Content = Loc.T("set.cleanupBtn");
@@ -396,6 +398,40 @@ namespace DshNotifyicon
                 RunEnvCheckAsync);
         }
 
+        // ── 手动指定 Node / pnpm 位置 ──
+
+        async void BtnPickNode_Click(object sender, RoutedEventArgs e)
+        {
+            await PickToolPathAsync(
+                Loc.T("env.pickNodeTitle"), Loc.T("env.pickNodeHint"), "node.exe",
+                () => App.Services.Settings.NodePath,
+                v => App.Services.Settings.NodePath = v);
+        }
+
+        async void BtnPickPnpm_Click(object sender, RoutedEventArgs e)
+        {
+            await PickToolPathAsync(
+                Loc.T("env.pickPnpmTitle"), Loc.T("env.pickPnpmHint"), "pnpm.exe",
+                () => App.Services.Settings.PnpmPath,
+                v => App.Services.Settings.PnpmPath = v);
+        }
+
+        /// <summary>
+        /// 指定路径 → 持久化 → 刷新 PATH → 重新体检。刷新这一步不能省：
+        /// 子进程（npm / dsh / 插件里的 spawnSync("pnpm")）看到的 PATH 来自 AppServices.EnvPath 的缓存。
+        /// </summary>
+        async Task PickToolPathAsync(string title, string hint, string fileName, Func<string> read, Action<string> write)
+        {
+            if (_opActive) return; // 长操作进行中：避免一边跑安装一边改路径
+            if (!IsLoaded) ShowOrActivate();
+            var dlg = new PathPickerDialog(title, hint, read(), fileName) { Owner = this };
+            if (dlg.ShowDialog() != true) return;
+            write(dlg.Value ?? "");
+            SettingsService.Save(App.Services.Settings);
+            App.Services.RefreshEnvPath();
+            await RunEnvCheckAsync();
+        }
+
         // ── 长操作统一交互（安装/更新）──
 
         void CancelOp()
@@ -522,7 +558,7 @@ namespace DshNotifyicon
                     return false;
                 }
 
-                var node = await NodeService.DetectAsync(s.NodePath);
+                var node = await NodeService.DetectAsync(s.NodePath, App.Services.EnvPath);
                 if (node.NodeExe == null)
                 {
                     Ask(Loc.T("svc.noNode"), MessageBoxButton.OK, MessageBoxImage.Information);
@@ -764,7 +800,6 @@ namespace DshNotifyicon
                 chkShowMain.IsChecked = s.ShowMainWindowOnStartup;
                 chkAutoStartDsh.IsChecked = s.AutoStartDshOnLaunch;
                 txtTrustedHosts.Text = s.TrustedHosts;
-                txtNodePath.Text = s.NodePath;
                 cmbLang.SelectedIndex = LangIndexFromSetting(s.Language);
                 cmbTrayDoubleClick.SelectedIndex = s.TrayDoubleClickAction == "web" ? 1 : 0;
                 if (s.MirrorUrl == "https://registry.npmmirror.com") cmbMirror.SelectedIndex = 1;
@@ -837,7 +872,6 @@ namespace DshNotifyicon
             s.ShowMainWindowOnStartup = chkShowMain.IsChecked == true;
             s.AutoStartDshOnLaunch = chkAutoStartDsh.IsChecked == true;
             s.TrustedHosts = (txtTrustedHosts.Text ?? "").Trim();
-            s.NodePath = (txtNodePath.Text ?? "").Trim();
             s.Language = LangSettingFromIndex(cmbLang.SelectedIndex);
             s.TrayDoubleClickAction = cmbTrayDoubleClick.SelectedIndex == 1 ? "web" : "main";
             bool autoStartChanged = s.AutoStartOnLogin != (chkAutoStart.IsChecked == true);
@@ -893,7 +927,7 @@ namespace DshNotifyicon
             try
             {
                 var s = App.Services.Settings;
-                var node = await NodeService.DetectAsync(s.NodePath);
+                var node = await NodeService.DetectAsync(s.NodePath, App.Services.EnvPath);
                 if (node.NodeExe == null)
                 {
                     MessageBox.Show(Loc.T("svc.noNode"), Loc.T("app.name"), MessageBoxButton.OK, MessageBoxImage.Information);
@@ -1252,7 +1286,7 @@ namespace DshNotifyicon
             try
             {
                 var s = App.Services.Settings;
-                var node = await NodeService.DetectAsync(s.NodePath);
+                var node = await NodeService.DetectAsync(s.NodePath, App.Services.EnvPath);
                 if (node.NodeExe == null)
                 {
                     MessageBox.Show(Loc.T("svc.noNode"), Loc.T("app.name"), MessageBoxButton.OK, MessageBoxImage.Information);

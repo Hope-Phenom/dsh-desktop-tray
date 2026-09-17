@@ -320,6 +320,82 @@ namespace DshNotifyicon
                         var node = NodeService.DetectAsync(settings.NodePath, envPath).GetAwaiter().GetResult();
                         b.AppendLine("nodeExe: " + (node.NodeExe ?? "MISSING"));
                         b.AppendLine("node: " + (node.NodeVersion ?? "?") + " npm: " + (node.NpmVersion ?? "?"));
+
+                        b.AppendLine("== 手动指定路径（override）==");
+                        // 目录形式必须解析出同一个 node.exe：用户把安装目录粘进来是常态
+                        if (node.NodeExe != null)
+                        {
+                            var nodeDir = Path.GetDirectoryName(node.NodeExe);
+                            var byDir = ToolPath.Resolve(nodeDir, "node.exe");
+                            b.AppendLine("resolve(dir=" + nodeDir + ") -> " + (byDir ?? "MISSING"));
+                            if (!string.Equals(byDir, node.NodeExe, StringComparison.OrdinalIgnoreCase))
+                            {
+                                b.AppendLine("ASSERT FAIL: 目录形式没有解析出同一个 node.exe");
+                                code = 1;
+                            }
+                        }
+                        // 故意无效的指定：必须回退到自动检测，并标记 OverrideInvalid（界面据此点名提示）
+                        var bogus = Path.Combine(Path.GetTempPath(), "dsh-no-such-tool-dir");
+                        b.AppendLine("bogus override: " + bogus + " (exists=" + Directory.Exists(bogus) + ")");
+                        var fallback = NodeService.DetectAsync(bogus, envPath).GetAwaiter().GetResult();
+                        b.AppendLine("node override(bogus) -> " + (fallback.NodeExe ?? "MISSING") + " overrideInvalid=" + fallback.OverrideInvalid);
+                        if (!fallback.OverrideInvalid)
+                        {
+                            b.AppendLine("ASSERT FAIL: 无效指定没有被标记 OverrideInvalid");
+                            code = 1;
+                        }
+                        if (!string.Equals(fallback.NodeExe, node.NodeExe, StringComparison.OrdinalIgnoreCase))
+                        {
+                            b.AppendLine("ASSERT FAIL: 无效指定没有回退到与自动检测相同的结果");
+                            code = 1;
+                        }
+                        // 空指定 = 自动检测，绝不能被当成"无效指定"（否则界面会无端报警）
+                        var empty = NodeService.DetectAsync("", envPath).GetAwaiter().GetResult();
+                        if (empty.OverrideInvalid)
+                        {
+                            b.AppendLine("ASSERT FAIL: 空指定被误判为无效");
+                            code = 1;
+                        }
+                        var pnpmBogus = NpmService.FindPnpm(envPath, bogus);
+                        b.AppendLine("pnpm override(bogus) -> " + (pnpmBogus.Path ?? "MISSING") + " overrideInvalid=" + pnpmBogus.OverrideInvalid);
+                        if (!pnpmBogus.OverrideInvalid)
+                        {
+                            b.AppendLine("ASSERT FAIL: pnpm 无效指定没有被标记 OverrideInvalid");
+                            code = 1;
+                        }
+                        var pnpmAuto = NpmService.FindPnpm(envPath, "");
+                        b.AppendLine("pnpm override(empty) -> " + (pnpmAuto.Path ?? "MISSING") + " overrideInvalid=" + pnpmAuto.OverrideInvalid);
+                        if (pnpmAuto.OverrideInvalid)
+                        {
+                            b.AppendLine("ASSERT FAIL: pnpm 空指定被误判为无效");
+                            code = 1;
+                        }
+                        // 回归点：NpmService 必须真的读到手动指定的 node。历史上这里写死过 null，
+                        // 结果是"体检显示指定了 node，镜像源/dsh 版本却仍走 PATH"。
+                        // 放一个空的假 node.exe：override 生效时 npm 会因找不到 npm-cli.js 报错，
+                        // 被忽略时这个调用反而会成功。
+                        var fakeDir = Path.Combine(Path.GetTempPath(), "dsh-smoke-fake-node");
+                        var prevOverride = ToolPathOverrides.Current;
+                        string npmErr = null;
+                        try
+                        {
+                            Directory.CreateDirectory(fakeDir);
+                            File.WriteAllText(Path.Combine(fakeDir, "node.exe"), "");
+                            ToolPathOverrides.Current = new Settings { NodePath = fakeDir };
+                            try { NpmService.GetRegistryAsync("", envPath).GetAwaiter().GetResult(); }
+                            catch (Exception ex) { npmErr = ex.Message; }
+                        }
+                        finally
+                        {
+                            ToolPathOverrides.Current = prevOverride;
+                            try { Directory.Delete(fakeDir, true); } catch { }
+                        }
+                        b.AppendLine("npm under fake node override -> " + (npmErr ?? "NO ERROR"));
+                        if (npmErr == null || npmErr.IndexOf("npm-cli.js", StringComparison.OrdinalIgnoreCase) < 0)
+                        {
+                            b.AppendLine("ASSERT FAIL: NpmService 没有使用手动指定的 node");
+                            code = 1;
+                        }
                         var reg = NpmService.GetRegistryAsync("", envPath).GetAwaiter().GetResult();
                         b.AppendLine("registry: " + reg.Trim());
                         var local = NpmService.GetDshLocalVersionAsync(envPath).GetAwaiter().GetResult();

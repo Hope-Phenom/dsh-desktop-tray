@@ -31,7 +31,10 @@
                     <GroupBox x:Name="gbNode" Header="Node.js 运行环境" Margin="0,12,0,0">
                         <StackPanel>
                             <TextBlock x:Name="txtNode" TextWrapping="Wrap"/>
-                            <Button x:Name="btnInstallNode" Content="一键安装 Node.js" Width="150" HorizontalAlignment="Left" Margin="0,8,0,0" Visibility="Collapsed" Click="BtnInstallNode_Click"/>
+                            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                <Button x:Name="btnInstallNode" Content="一键安装 Node.js" Width="150" Visibility="Collapsed" Click="BtnInstallNode_Click"/>
+                                <Button x:Name="btnPickNode" Content="指定 Node 路径…" Width="130" Margin="8,0,0,0" Click="BtnPickNode_Click"/>
+                            </StackPanel>
                         </StackPanel>
                     </GroupBox>
 
@@ -64,7 +67,10 @@
                     <GroupBox x:Name="gbPnpm" Header="pnpm（dsh 插件管理必需）" Margin="0,12,0,0">
                         <StackPanel>
                             <TextBlock x:Name="txtPnpm" TextWrapping="Wrap"/>
-                            <Button x:Name="btnInstallPnpm" Content="一键安装 pnpm" Width="150" HorizontalAlignment="Left" Margin="0,8,0,0" Visibility="Collapsed" Click="BtnInstallPnpm_Click"/>
+                            <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                <Button x:Name="btnInstallPnpm" Content="一键安装 pnpm" Width="150" Visibility="Collapsed" Click="BtnInstallPnpm_Click"/>
+                                <Button x:Name="btnPickPnpm" Content="指定 pnpm 路径…" Width="130" Margin="8,0,0,0" Click="BtnPickPnpm_Click"/>
+                            </StackPanel>
                         </StackPanel>
                     </GroupBox>
                 </StackPanel>
@@ -148,8 +154,8 @@
                         <StackPanel>
                             <TextBlock x:Name="lblTrusted" Text="trusted-host（可选，逗号/分号分隔，可重复传给 dsh）:"/>
                             <TextBox x:Name="txtTrustedHosts" Margin="0,4,0,0"/>
-                            <TextBlock x:Name="lblNodePath" Text="Node.js 可执行文件路径（留空自动检测）:" Margin="0,10,0,0"/>
-                            <TextBox x:Name="txtNodePath" Margin="0,4,0,0"/>
+                            <TextBlock x:Name="lblNodePathHint" Foreground="Gray" TextWrapping="Wrap" Margin="0,10,0,0"
+                                       Text="Node.js / pnpm 的位置在环境页用「指定路径…」设置（留空自动检测），这里不再重复。"/>
                         </StackPanel>
                     </GroupBox>
 

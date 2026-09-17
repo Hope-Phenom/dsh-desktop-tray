@@ -71,6 +71,13 @@ namespace DshNotifyicon.Services
         }
     }
 
+    /// <summary>pnpm 解析结果：Path = 命中路径（null = 未找到）；OverrideInvalid = 指定了但无效。</summary>
+    public class PnpmInfo
+    {
+        public string Path;
+        public bool OverrideInvalid;
+    }
+
     /// <summary>
     /// npm 操作封装。要点：
     /// 1. 一律用 node 直调 npm-cli.js（不用 .cmd shim），cwd 固定 %USERPROFILE% 避开项目级 .npmrc；
@@ -90,8 +97,8 @@ namespace DshNotifyicon.Services
         /// <summary>执行 npm 命令（node + npm-cli.js），非零退出码抛异常。timeoutMs 默认 20 分钟（安装用），查询类命令应传短超时。</summary>
         static async Task<string> ExecNpmAsync(string args, string envPath, Action<string> log, CancellationToken ct, int timeoutMs = 20 * 60 * 1000)
         {
-            // 用刷新后的 PATH 检测 node（Node 刚安装后立即可用）
-            var node = await NodeService.DetectAsync(null, envPath);
+            // 用刷新后的 PATH 检测 node（Node 刚安装后立即可用）；手动指定的位置同样生效
+            var node = await NodeService.DetectAsync(ToolPathOverrides.Node, envPath);
             if (node.NodeExe == null) throw new InvalidOperationException(Loc.T("npm.noNode"));
             if (node.NpmCliJs == null) throw new InvalidOperationException(Loc.T("npm.noCli"));
             var spec = new ProcessSpec
@@ -205,9 +212,19 @@ namespace DshNotifyicon.Services
             catch { return null; }
         }
 
-        /// <summary>在刷新后的 PATH 中查找 pnpm 可执行文件（pnpm.exe / pnpm.cmd）。dsh 的 plugin 命令内部 spawnSync("pnpm")，缺失会报 "'pnpm' 不是内部或外部命令"。</summary>
-        public static string FindPnpm(string envPath)
+        /// <summary>
+        /// 解析 pnpm 可执行文件：手动指定优先（pnpm.exe / pnpm.cmd 或其所在目录都接受，
+        /// 无效则记 OverrideInvalid 并回退），否则在刷新后的 PATH 中查找。
+        /// dsh 的 plugin 命令内部 spawnSync("pnpm")，缺失会报 "'pnpm' 不是内部或外部命令"。
+        /// </summary>
+        public static PnpmInfo FindPnpm(string envPath, string pnpmOverride = null)
         {
+            // 传 null 走"当前生效的手动指定"（ToolPathOverrides），调用方无设置对象时也不会漏
+            var input = pnpmOverride ?? ToolPathOverrides.Pnpm;
+            var resolved = ToolPath.Resolve(input, "pnpm.exe", "pnpm.cmd");
+            var info = new PnpmInfo { Path = resolved, OverrideInvalid = ToolPath.IsInvalid(input, resolved) };
+            if (resolved != null) return info;
+
             var exts = new[] { ".exe", ".cmd" };
             foreach (var seg in (envPath ?? "").Split(';'))
             {
@@ -219,25 +236,26 @@ namespace DshNotifyicon.Services
                 foreach (var ext in exts)
                 {
                     var p = Path.Combine(dir, "pnpm" + ext);
-                    if (File.Exists(p)) return p;
+                    if (File.Exists(p)) { info.Path = p; return info; }
                 }
             }
-            return null;
+            return info;
         }
 
         /// <summary>
-        /// 确保 pnpm 可用：缺失时 npm install -g pnpm（尊重镜像源），安装后刷新 PATH 再验证。
-        /// 返回刷新后的 PATH（安装可能新增目录，调用方应使用返回值而非旧 envPath）。
+        /// 确保 pnpm 可用：手动指定的那份算"可用"（不会去 npm install -g pnpm 把它覆盖掉），
+        /// 否则缺失时 npm install -g pnpm（尊重镜像源），安装后刷新 PATH 再验证。
+        /// 返回应交给子进程的 PATH（手动指定的目录仍需重新前置，RefreshPath() 只反映注册表与进程 PATH）。
         /// </summary>
         public static async Task<string> EnsurePnpmAsync(string mirrorUrl, string envPath, Action<string> log, CancellationToken ct)
         {
-            if (FindPnpm(envPath) != null) return envPath;
+            if (FindPnpm(envPath).Path != null) return envPath;
             log(Loc.T("npm.pnpmInstalling"));
             await WithGateAsync(() => ExecNpmAsync("install -g pnpm" + RegistryArg(mirrorUrl), envPath, log, ct));
             var fresh = NodeService.RefreshPath();
-            if (FindPnpm(fresh) == null)
+            if (FindPnpm(fresh).Path == null)
                 throw new InvalidOperationException(Loc.T("npm.pnpmInstallFail"));
-            return fresh;
+            return NodeService.WithToolOverrides(fresh, ToolPathOverrides.Node, ToolPathOverrides.Pnpm);
         }
     }
 }
