@@ -16,6 +16,16 @@ namespace DshNotifyicon.Services
     {
         static readonly Regex Rx = new Regex(@"^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$", RegexOptions.Compiled);
 
+        /// <summary>
+        /// 版本串是否可被严格解析（与 Compare 同一套规则：容忍前导 v 与首尾空白）。
+        /// 调用方要求"严格解析通过"时应先问这里：Compare 对无法解析的输入会退化成字符串序比较，
+        /// 拿它单独做阈值判断会在异常版本串上给出"看似成功"的结论。
+        /// </summary>
+        public static bool IsValid(string version)
+        {
+            return Rx.IsMatch((version ?? "").Trim().TrimStart('v'));
+        }
+
         /// <summary>a &lt; b 返回负数；a == b 返回 0；a &gt; b 返回正数。</summary>
         public static int Compare(string a, string b)
         {

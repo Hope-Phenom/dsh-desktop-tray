@@ -26,7 +26,8 @@ A WPF (.NET Framework 4.6.2) desktop tray assistant for [DeepSeek Harness](https
 ### DSH service start/stop (Service tab / tray menu)
 
 - Configurable port (1-65535) or random port (`--port 0`, OS-assigned), launched hidden in the background
-- Parses the real URL from dsh output (accurate for random ports too); opens the browser automatically once the health probe (HTTP 200) passes (can be disabled)
+- Parses the real URL from dsh output (accurate for random ports too); opens the browser automatically once the service is ready (health probe passes) (can be disabled)
+- **The browser handoff is owned by this tool**: newer dsh (≥ `0.1.0-rc.8`) opens a tab on its own, so the tool appends `--no-open` — **checked = exactly one tab, unchecked = none at all**. Older dsh (< `0.1.0-rc.8`) gets no such flag and behaves exactly as before
 - **Port-in-use preflight** + **external dsh instance scan** before start: prevents two instances from corrupting sessions by writing the same `DSH_HOME` concurrently
 - Stop = kill process tree (`taskkill /T /F`); unexpected exits are detected, notified, and state is reset
 - Full runtime log panel (stdout/stderr streamed live for diagnostics)
@@ -157,6 +158,7 @@ Runs the environment check + a real dsh start/stop (random port) + HTTP probe, w
 | Want data back after cleanup | Stop dsh, then rename `%USERPROFILE%\.dsh.bak-<date>` back to `.dsh` (contains credentials & sessions) |
 | Tray icon disappeared | Single-instance behavior: launching the exe again activates the running instance; if it really exited, end DshNotifyicon.exe in Task Manager and relaunch |
 | Tool crashes / becomes unresponsive | All exceptions are written to `%APPDATA%\DshNotifyicon\crash-*.log` (exception details + recent log snapshot) and a tray balloon is shown on next start; send that file to the developer after reproducing |
+| Start fails with `unknown option '--no-open'` in the log | This tool's capability rule for dsh is out of date (dsh renamed or removed the flag); the log names it explicitly. Update this tool to the latest version |
 
 ## Directory structure
 
@@ -175,6 +177,7 @@ DshNotifyicon/
 │  │  ├─ NodeService.cs      Node.js detection / winget+MSI install / PATH refresh
 │  │  ├─ NpmService.cs       npm wrapper (@latest, per-command --registry, serialized queue, semver)
 │  │  ├─ DshProcessManager.cs  State machine, preflight, URL parsing, health probe, start/stop, DSH_NOTIFY parsing
+│  │  ├─ DshCapabilities.cs  Version lookup & web-CLI capability rules for the installed dsh (--no-open gating)
 │  │  └─ EnvironmentCheckService.cs  Health-check aggregation
 │  └─ Assets/app.ico         Icon (rendered from DeepSeek's official favicon.svg; app-running has a green dot)
 └─ tools/

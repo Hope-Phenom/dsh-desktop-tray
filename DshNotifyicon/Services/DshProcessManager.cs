@@ -193,15 +193,26 @@ namespace DshNotifyicon.Services
                 _cancelStart = false;
 
                 int actualPort = randomPort ? 0 : port;
+                // 新版 dsh 默认自己弹浏览器，会与本工具的"启动成功后自动打开浏览器"叠加：
+                // 勾选时开两个标签页，取消勾选时 dsh 仍弹一个。支持 --no-open 时一律附加，
+                // 把浏览器弹出完全交给本工具。版本判定保守：不确定就不附加（老版本收到未知参数会直接退出）。
+                var dshVersion = DshCapabilities.VersionFromBinJs(binJs);
+                bool noOpen = DshCapabilities.SupportsNoOpen(dshVersion);
                 var args = ProcessRunner.Quote(binJs) + " web --port " + actualPort;
+                // 紧跟 --port：与变参的 --trusted-host 保持距离，避免选项解析歧义
+                if (noOpen) args += " --no-open";
                 if (!string.IsNullOrEmpty(trustedHosts))
                 {
                     foreach (var h in trustedHosts.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries))
                         args += " --trusted-host " + ProcessRunner.Quote(h.Trim());
                 }
+                if (noOpen) Log(Loc.T("dsh.noOpen", dshVersion));
+                else if (dshVersion.Length > 0) Log(Loc.T("dsh.noOpenOld", dshVersion, DshCapabilities.NoOpenSinceVersion));
+                else Log(Loc.T("dsh.noOpenUnknown"));
                 Log(Loc.T("dsh.starting", nodeExe, args));
 
                 var urlHolder = new string[2]; // [0]=裸 URL，[1]=带令牌入口 URL
+                var sawUnknownOption = new bool[1]; // dsh 是否拒绝了未知参数（用于给出可操作的诊断）
                 var exitedTcs = new TaskCompletionSource<bool>();
                 Process proc;
                 try
@@ -217,8 +228,8 @@ namespace DshNotifyicon.Services
                             { "DSH_NOTIFY_INCLUDE_SUBAGENTS", notifySubagents ? "1" : "0" }
                         }
                     },
-                    line => OnProcLine(line, urlHolder),
-                    line => { Log("[stderr] " + line); });
+                    line => { if (LooksLikeUnknownOption(line)) sawUnknownOption[0] = true; OnProcLine(line, urlHolder); },
+                    line => { if (LooksLikeUnknownOption(line)) sawUnknownOption[0] = true; Log("[stderr] " + line); });
                 }
                 catch (Exception ex)
                 {
@@ -289,6 +300,10 @@ namespace DshNotifyicon.Services
                 if (proc.HasExited && !healthy)
                 {
                     Log(Loc.T("dsh.earlyExit", SafeExitCode(proc)));
+                    // 只可能出现在"版本能力判定已过时"（例如未来 dsh 改名/删除该选项）：
+                    // 明确点名原因，免得用户只看到一句"启动失败"。
+                    if (noOpen && sawUnknownOption[0])
+                        Log(Loc.T("dsh.noOpenRejected", dshVersion, DshCapabilities.NoOpenSinceVersion));
                     _proc = null;
                     ProcessId = null;
                     SetState(DshState.Error);
@@ -372,6 +387,15 @@ namespace DshNotifyicon.Services
         static int SafeExitCode(Process p)
         {
             try { return p.ExitCode; } catch { return -1; }
+        }
+
+        /// <summary>
+        /// commander 拒绝未知参数的输出特征：内层程序未开 allowUnknownOption 时会打印
+        /// "error: unknown option '--no-open'"（code commander.unknownOption）并以 1 退出。
+        /// </summary>
+        static bool LooksLikeUnknownOption(string line)
+        {
+            return line != null && line.IndexOf("unknown option", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         /// <summary>

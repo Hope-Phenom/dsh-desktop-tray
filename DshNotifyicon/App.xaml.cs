@@ -327,6 +327,8 @@ namespace DshNotifyicon
                         b.AppendLine("dsh local: " + (local.Length > 0 ? local : "MISSING") + " latest: " + latest.Trim());
                         var binJs = NpmService.ResolveDshBinJsAsync(envPath).GetAwaiter().GetResult();
                         b.AppendLine("dsh binJs: " + (binJs ?? "MISSING"));
+                        var dshVer = DshCapabilities.VersionFromBinJs(binJs);
+                        b.AppendLine("dsh version: " + (dshVer.Length > 0 ? dshVer : "UNKNOWN") + " no-open: " + DshCapabilities.SupportsNoOpen(dshVer));
 
                         b.AppendLine("== dsh start/stop (random port) ==");
                         var mgr = new DshProcessManager();

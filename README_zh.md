@@ -26,7 +26,8 @@
 ### DSH 服务启停（服务页 / 托盘菜单）
 
 - 端口可配（1-65535）或随机端口（`--port 0`，由 OS 分配），隐藏窗口后台启动
-- 解析 dsh 输出中的实际 URL（随机端口场景同样准确），健康探测（HTTP 200）通过后自动打开浏览器（可关）
+- 解析 dsh 输出中的实际 URL（随机端口场景同样准确），服务就绪（健康探测通过）后自动打开浏览器（可关）
+- **浏览器弹出由本工具统一接管**：新版 dsh（≥ `0.1.0-rc.8`）启动时会自己弹一次浏览器，工具会自动附加 `--no-open` 阻止它——**勾选设置 = 只弹一个标签页，取消勾选 = 完全不弹**；旧版 dsh（< `0.1.0-rc.8`）不附加该开关，行为与以前完全一致
 - 启动前**端口占用预检** + **外部 dsh 实例扫描**：防止双实例并发写同一 `DSH_HOME` 损坏会话数据
 - 停止 = 杀进程树（`taskkill /T /F`）；进程意外退出自动通知并复位状态
 - 完整运行日志面板（stdout/stderr 实时滚动，便于诊断）
@@ -157,6 +158,7 @@ DshNotifyicon.exe --smoke
 | 清理 dsh 环境后想恢复数据 | 停止 dsh 后，把 `%USERPROFILE%\.dsh.bak-日期` 改名为 `.dsh` 即可恢复（含凭据与会话） |
 | 托盘图标消失 | 属单实例机制：再启动一次 exe 会激活已运行实例；若确实退出，任务管理器结束 DshNotifyicon.exe 后重开 |
 | 工具闪退/无响应 | 所有异常都会落盘到 `%APPDATA%\DshNotifyicon\crash-*.log`（异常详情 + 最近日志快照），下次启动会托盘提示；复现后把该文件发给开发者即可定位 |
+| 启动失败，日志出现 `unknown option '--no-open'` | 本工具对 dsh 的能力判定已过时（dsh 改名或删除了该开关），日志会直接点名。请更新本工具到最新版本 |
 
 ## 目录结构
 
@@ -175,6 +177,7 @@ DshNotifyicon/
 │  │  ├─ NodeService.cs      Node.js 检测 / winget+MSI 安装 / PATH 刷新
 │  │  ├─ NpmService.cs       npm 封装（@latest、--registry 单次源、串行队列、semver）
 │  │  ├─ DshProcessManager.cs  状态机、前置检查、URL 解析、健康探测、启停、DSH_NOTIFY 解析
+│  │  ├─ DshCapabilities.cs  已安装 dsh 的版本读取与 Web CLI 能力判定（--no-open 门控）
 │  │  └─ EnvironmentCheckService.cs  一键体检聚合
 │  └─ Assets/app.ico         图标（DeepSeek 官方 favicon.svg 渲染；app-running 带绿点）
 └─ tools/
