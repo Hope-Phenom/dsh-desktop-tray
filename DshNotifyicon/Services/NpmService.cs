@@ -75,7 +75,8 @@ namespace DshNotifyicon.Services
     public class PnpmInfo
     {
         public string Path;
-        public bool OverrideInvalid;
+        /// <summary>手动指定了位置但校验不通过的原因（null = 未指定或通过）。</summary>
+        public string OverrideIssue;
     }
 
     /// <summary>
@@ -213,17 +214,24 @@ namespace DshNotifyicon.Services
         }
 
         /// <summary>
-        /// 解析 pnpm 可执行文件：手动指定优先（pnpm.exe / pnpm.cmd 或其所在目录都接受，
-        /// 无效则记 OverrideInvalid 并回退），否则在刷新后的 PATH 中查找。
-        /// dsh 的 plugin 命令内部 spawnSync("pnpm")，缺失会报 "'pnpm' 不是内部或外部命令"。
+        /// pnpm 版本探测超时：corepack 托管的 pnpm.cmd 首次运行可能要自己下载，给足时间，
+        /// 免得把一个能用（只是首次慢）的 pnpm 误判成无效。
         /// </summary>
-        public static PnpmInfo FindPnpm(string envPath, string pnpmOverride = null)
+        const int PnpmProbeTimeoutMs = 30000;
+
+        /// <summary>
+        /// 解析 pnpm 可执行文件：手动指定优先（pnpm.exe / pnpm.cmd 或其所在目录都接受，
+        /// 校验不通过则记 OverrideIssue 并回退），否则在刷新后的 PATH 中查找。
+        /// dsh 的 plugin 命令内部 spawnSync("pnpm")，缺失会报 "'pnpm' 不是内部或外部命令"。
+        /// 注意 PATH 兜底只看存在性、不做校验：核心是别让一个残缺的 PATH 条目把体检拖成误报。
+        /// </summary>
+        public static async Task<PnpmInfo> FindPnpmAsync(string envPath, string pnpmOverride = null)
         {
             // 传 null 走"当前生效的手动指定"（ToolPathOverrides），调用方无设置对象时也不会漏
             var input = pnpmOverride ?? ToolPathOverrides.Pnpm;
-            var resolved = ToolPath.Resolve(input, "pnpm.exe", "pnpm.cmd");
-            var info = new PnpmInfo { Path = resolved, OverrideInvalid = ToolPath.IsInvalid(input, resolved) };
-            if (resolved != null) return info;
+            var check = await ToolPath.CheckAsync(input, PnpmProbeTimeoutMs, "pnpm.exe", "pnpm.cmd");
+            var info = new PnpmInfo { Path = check.Path, OverrideIssue = check.Error };
+            if (info.Path != null) return info;
 
             var exts = new[] { ".exe", ".cmd" };
             foreach (var seg in (envPath ?? "").Split(';'))
@@ -249,11 +257,11 @@ namespace DshNotifyicon.Services
         /// </summary>
         public static async Task<string> EnsurePnpmAsync(string mirrorUrl, string envPath, Action<string> log, CancellationToken ct)
         {
-            if (FindPnpm(envPath).Path != null) return envPath;
+            if ((await FindPnpmAsync(envPath)).Path != null) return envPath;
             log(Loc.T("npm.pnpmInstalling"));
             await WithGateAsync(() => ExecNpmAsync("install -g pnpm" + RegistryArg(mirrorUrl), envPath, log, ct));
             var fresh = NodeService.RefreshPath();
-            if (FindPnpm(fresh).Path == null)
+            if ((await FindPnpmAsync(fresh)).Path == null)
                 throw new InvalidOperationException(Loc.T("npm.pnpmInstallFail"));
             return NodeService.WithToolOverrides(fresh, ToolPathOverrides.Node, ToolPathOverrides.Pnpm);
         }

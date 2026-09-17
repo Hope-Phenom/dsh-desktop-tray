@@ -47,9 +47,9 @@ namespace DshNotifyicon.Services
                 try
                 {
                     var node = await NodeService.DetectAsync(settings.NodePath, envPath);
-                    // 手动指定的路径无效时不能闷着回退：那样界面看起来一切正常，
-                    // 用户却以为"我指定的那个 node 正在被使用"。
-                    var hint = node.OverrideInvalid ? "\n" + Loc.T("ec.overrideFallback", settings.NodePath) : "";
+                    // 手动指定的位置校验不通过时不能闷着回退：那样界面看起来一切正常，
+                    // 用户却以为"我指定的那个 node 正在被使用"。原因（文件名不对/跑不起来）一并说明。
+                    var hint = OverrideHint(settings.NodePath, node.OverrideIssue);
                     if (node.NodeExe == null)
                     {
                         items.Add(new EnvItem { Name = "Node.js", Status = EnvStatus.Missing, Detail = Loc.T("ec.nodeMissing") + hint });
@@ -90,8 +90,8 @@ namespace DshNotifyicon.Services
 
                 // pnpm（dsh 插件管理必需，纯本地检查）
                 log?.Invoke(Loc.T("ec.checkingPnpm"));
-                var pnpm = NpmService.FindPnpm(envPath, settings.PnpmPath);
-                var pnpmHint = pnpm.OverrideInvalid ? "\n" + Loc.T("ec.overrideFallback", settings.PnpmPath) : "";
+                var pnpm = await NpmService.FindPnpmAsync(envPath, settings.PnpmPath);
+                var pnpmHint = OverrideHint(settings.PnpmPath, pnpm.OverrideIssue);
                 if (pnpm.Path == null)
                 {
                     items.Add(new EnvItem { Name = "pnpm", Status = EnvStatus.Missing, Detail = Loc.T("ec.pnpmMissing") + pnpmHint });
@@ -136,6 +136,12 @@ namespace DshNotifyicon.Services
                 }
             }
             return items;
+        }
+
+        /// <summary>"手动指定但校验不通过"的提示行（含原因）；未指定或通过时为空串。</summary>
+        static string OverrideHint(string input, string issue)
+        {
+            return string.IsNullOrEmpty(issue) ? "" : "\n" + Loc.T("ec.overrideFallback", input, issue);
         }
     }
 }

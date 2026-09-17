@@ -18,8 +18,8 @@ namespace DshNotifyicon.Services
         public string NpmVersion;
         /// <summary>npm-cli.js 完整路径（node 直调 npm 用）。</summary>
         public string NpmCliJs;
-        /// <summary>用户手动指定了路径但解析不到（此时 NodeExe 来自自动检测，界面需点名说明）。</summary>
-        public bool OverrideInvalid;
+        /// <summary>手动指定了位置但校验不通过的原因（null = 未指定或通过）。NodeExe 此时来自自动检测。</summary>
+        public string OverrideIssue;
     }
 
     /// <summary>
@@ -96,22 +96,46 @@ namespace DshNotifyicon.Services
         }
     }
 
+    /// <summary>结构解析结果：Path = 命中文件（null = 未命中）；Error = 未命中的原因（null = 未指定或解析成功）。</summary>
+    public class ToolPathResult
+    {
+        public string Path;
+        public string Error;
+    }
+
+    /// <summary>完整校验结果：Error 为 null 才算通过；Version = 探到的工具版本。</summary>
+    public class ToolCheck
+    {
+        public string Path;
+        public string Version;
+        public string Error;
+    }
+
     /// <summary>
-    /// "手动指定位置"的路径解析。输入既可以是可执行文件本身，也可以是它所在的目录
-    /// （用户往往直接把安装目录粘进来）。解析不到——空输入、路径不存在、含非法字符、
-    /// 目录里没有候选文件——一律返回 null，由调用方决定回退自动检测并在界面上点名，
-    /// 这里绝不抛异常。
+    /// "手动指定位置"的解析与校验。输入既可以是可执行文件本身，也可以是它所在的目录
+    /// （用户往往直接把安装目录粘进来）。
+    ///
+    /// 分两层，因为成本差一个量级：
+    /// 1) Resolve —— 只看文件名与存在性，不启动进程（拼 PATH 时会被频繁调用）；
+    /// 2) CheckAsync —— 再真跑一次 --version 确认它确实是那个工具。
+    /// 只做存在性判断是不够的：同名空文件、残缺安装、被替换成别的程序都会"看起来正常"，
+    /// 然后在使用处报一个与指定位置毫不相干的错。两层都把原因带出来，由调用方回退并点名。
     /// </summary>
     public static class ToolPath
     {
+        /// <summary>node 的版本探测超时（正常远小于 1s）。</summary>
+        public const int NodeProbeTimeoutMs = 15000;
+
         /// <summary>
-        /// 解析手动指定的路径，fileNames 按优先级排列（如 pnpm.exe → pnpm.cmd）。
-        /// 返回命中文件的完整路径；未指定或无效返回 null。
+        /// 结构解析。目录 → 逐个候选文件名找；文件 → 文件名必须就是候选名之一
+        /// （常见错误是在同一目录里点了别的 exe）。空输入不算错误（= 未指定）。
         /// </summary>
-        public static string Resolve(string input, params string[] fileNames)
+        public static ToolPathResult Resolve(string input, params string[] fileNames)
         {
+            var r = new ToolPathResult();
             var v = PathGuard.StripQuotes(input);
-            if (v.Length == 0 || !PathGuard.IsSafe(v)) return null;
+            if (v.Length == 0) return r; // 未指定
+            if (!PathGuard.IsSafe(v)) { r.Error = Loc.T("path.illegal"); return r; }
             try
             {
                 if (Directory.Exists(v))
@@ -119,19 +143,71 @@ namespace DshNotifyicon.Services
                     foreach (var name in fileNames)
                     {
                         var p = Path.Combine(v, name);
-                        if (File.Exists(p)) return p;
+                        if (File.Exists(p)) { r.Path = p; return r; }
                     }
-                    return null; // 目录存在但没有候选可执行文件 → 同样算无效
+                    r.Error = Loc.T("path.noExeInDir", string.Join(" / ", fileNames), v);
+                    return r;
                 }
-                return File.Exists(v) ? v : null;
+                if (!File.Exists(v)) { r.Error = Loc.T("path.notExist", v); return r; }
+                var actual = Path.GetFileName(v);
+                foreach (var name in fileNames)
+                {
+                    if (string.Equals(actual, name, StringComparison.OrdinalIgnoreCase)) { r.Path = v; return r; }
+                }
+                // 名字不对就直接到此为止：不必再去跑它（选到记事本这类 GUI 程序会白等一个超时）
+                r.Error = Loc.T("path.wrongName", string.Join(" / ", fileNames), actual);
+                return r;
             }
-            catch { return null; } // 非法字符等：Path.Combine 会抛，视为无效
+            catch { r.Error = Loc.T("path.illegal"); return r; } // 非法字符等：Path.Combine 会抛
         }
 
-        /// <summary>是否"指定了但无效"（空输入 = 未指定，不算无效）。</summary>
-        public static bool IsInvalid(string input, string resolved)
+        /// <summary>
+        /// 结构解析 + 权威校验：真的把它跑起来问版本。--version 输出里任一行能解析成版本号才算数，
+        /// 名字对但跑不起来（空文件、残缺安装、同名占位程序）同样会被挡住。
+        /// Error = null 表示未指定或通过。
+        /// </summary>
+        public static async Task<ToolCheck> CheckAsync(string input, int timeoutMs, params string[] fileNames)
         {
-            return resolved == null && PathGuard.StripQuotes(input).Length > 0;
+            var r = Resolve(input, fileNames);
+            var c = new ToolCheck { Path = r.Path, Error = r.Error };
+            if (c.Path == null) return c;
+            c.Version = await ProbeVersionAsync(c.Path, timeoutMs);
+            if (c.Version == null)
+            {
+                c.Path = null;
+                c.Error = Loc.T("path.notRunnable", fileNames[0]);
+            }
+            return c;
+        }
+
+        /// <summary>
+        /// 跑 &lt;exe&gt; --version，返回输出里第一个能解析成版本号的行。
+        /// 跑不起来、超时、输出不像版本号一律返回 null。
+        /// .cmd/.bat 必须经 cmd.exe 才能启动（CreateProcess 不认批处理），所以要显式拼一次 /c。
+        /// </summary>
+        public static async Task<string> ProbeVersionAsync(string exePath, int timeoutMs)
+        {
+            try
+            {
+                var ext = (Path.GetExtension(exePath) ?? "").ToLowerInvariant();
+                var spec = ext == ".cmd" || ext == ".bat"
+                    ? new ProcessSpec
+                    {
+                        FileName = "cmd.exe",
+                        Arguments = "/c " + ProcessRunner.Quote(exePath) + " --version",
+                        TimeoutMs = timeoutMs
+                    }
+                    : new ProcessSpec { FileName = exePath, Arguments = "--version", TimeoutMs = timeoutMs };
+                var r = await ProcessRunner.RunAsync(spec, CancellationToken.None, null);
+                if (r.TimedOut || r.Cancelled || r.ExitCode != 0) return null;
+                foreach (var raw in (r.Output ?? "").Split('\n'))
+                {
+                    var line = raw.Trim();
+                    if (line.Length > 0 && Semver.IsValid(line)) return line;
+                }
+                return null;
+            }
+            catch { return null; }
         }
     }
 
@@ -213,8 +289,8 @@ namespace DshNotifyicon.Services
                 }
                 catch { } // GetDirectoryName 会校验非法字符：拿不到目录就当没指定
             };
-            addDir(ToolPath.Resolve(nodePath, "node.exe"));
-            addDir(ToolPath.Resolve(pnpmPath, "pnpm.exe", "pnpm.cmd"));
+            addDir(ToolPath.Resolve(nodePath, "node.exe").Path);
+            addDir(ToolPath.Resolve(pnpmPath, "pnpm.exe", "pnpm.cmd").Path);
             if (dirs.Count == 0) return envPath;
             return string.Join(";", dirs) + ";" + (envPath ?? "");
         }
@@ -231,11 +307,15 @@ namespace DshNotifyicon.Services
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             // 脏候选（含非法路径字符）在这里就被挡掉：拼路径前过滤，而不是等 Path.Combine 抛异常
             Action<string> addCand = (p) => { if (PathGuard.IsSafe(p) && seen.Add(p)) candidates.Add(p); };
+            string overrideVersion = null;
             try
             {
-                var overrideExe = ToolPath.Resolve(nodeExeOverride, "node.exe");
-                info.OverrideInvalid = ToolPath.IsInvalid(nodeExeOverride, overrideExe);
-                addCand(overrideExe);
+                // 手动指定优先，但必须校验通过（文件名对 + 真能跑出版本号）；不通过就回退自动检测，
+                // 并把原因带出去让体检点名——静默回退会让用户以为指定的那个 node 正在被使用。
+                var check = await ToolPath.CheckAsync(nodeExeOverride, ToolPath.NodeProbeTimeoutMs, "node.exe");
+                info.OverrideIssue = check.Error;
+                overrideVersion = check.Version;
+                addCand(check.Path);
                 AddFromPath(envPath, addCand);
                 AddFromPath(Environment.GetEnvironmentVariable("Path"), addCand);
                 addCand(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs", "node.exe"));
@@ -259,11 +339,14 @@ namespace DshNotifyicon.Services
             }
             catch { } // GetDirectoryName 同样校验非法字符：拿不到 npm-cli.js 也不该中断检测
 
+            // 校验手动指定时已经跑过一次 --version，别重复启动进程
+            info.NodeVersion = overrideVersion;
             try
             {
-                info.NodeVersion = (await ProcessRunner.RunAsync(
-                    new ProcessSpec { FileName = nodeExe, Arguments = "--version", TimeoutMs = 15000 },
-                    CancellationToken.None, null)).Output.Trim();
+                if (info.NodeVersion == null)
+                    info.NodeVersion = (await ProcessRunner.RunAsync(
+                        new ProcessSpec { FileName = nodeExe, Arguments = "--version", TimeoutMs = 15000 },
+                        CancellationToken.None, null)).Output.Trim();
             }
             catch { }
             if (info.NpmCliJs != null)

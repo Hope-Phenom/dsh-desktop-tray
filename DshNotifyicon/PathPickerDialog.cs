@@ -17,7 +17,10 @@ namespace DshNotifyicon
         readonly TextBox _box = new TextBox();
         readonly string _fileNames;
 
-        /// <param name="fileNames">候选可执行文件名，如 "node.exe"，用于浏览对话框的过滤器。</param>
+        /// <param name="fileNames">
+        /// 候选可执行文件名（多个用 ";" 分隔，如 "pnpm.exe;pnpm.cmd"），用于浏览对话框的过滤器；
+        /// 校验用的文件名列表由调用方按同一份字符串拆分，保持一致。
+        /// </param>
         public PathPickerDialog(string title, string hint, string current, string fileNames)
         {
             _fileNames = fileNames;

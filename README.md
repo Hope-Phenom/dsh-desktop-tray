@@ -82,7 +82,7 @@ NuGet dependencies: `Hardcodet.NotifyIcon.Wpf` (tray), `Newtonsoft.Json` (settin
 
 1. **First launch**: the main window is shown; afterwards it hides to the tray by default (changeable via "Show main window on startup" in Settings).
 2. **Environment tab → Health Check**: see Node.js / npm mirror / dsh status; click the button of any missing item to fix it.
-   If Node.js or pnpm lives outside PATH (portable build, nvm, custom install dir), use **Specify path…** in that group: enter the full path to the executable or just the folder containing it; empty = auto-detect. An invalid path falls back to auto-detection and the item says so explicitly.
+   If Node.js or pnpm lives outside PATH (portable build, nvm, custom install dir), use **Specify path…** in that group: enter the full path to the executable or just the folder containing it; empty = auto-detect. The location is **validated on the spot** (the file name must match and it must actually report a version); a failure shows why and you may still save it. If it still fails validation, the health check falls back to auto-detection and states the reason instead of silently using a tool from elsewhere.
 3. **Service tab**: set the port (or tick random port) → **Start DSH** → the browser opens the Web UI automatically.
 4. **Tray**: day-to-day operations live here — the icon gains a green dot while running; hover to see the current URL.
 5. **UI Language** (optional): follows the system by default; switch to 中文 / English anytime from the "UI Language" dropdown in Settings — takes effect immediately.

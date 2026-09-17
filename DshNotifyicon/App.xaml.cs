@@ -321,12 +321,12 @@ namespace DshNotifyicon
                         b.AppendLine("nodeExe: " + (node.NodeExe ?? "MISSING"));
                         b.AppendLine("node: " + (node.NodeVersion ?? "?") + " npm: " + (node.NpmVersion ?? "?"));
 
-                        b.AppendLine("== 手动指定路径（override）==");
+                        b.AppendLine("== 手动指定位置（override）==");
                         // 目录形式必须解析出同一个 node.exe：用户把安装目录粘进来是常态
                         if (node.NodeExe != null)
                         {
                             var nodeDir = Path.GetDirectoryName(node.NodeExe);
-                            var byDir = ToolPath.Resolve(nodeDir, "node.exe");
+                            var byDir = ToolPath.Resolve(nodeDir, "node.exe").Path;
                             b.AppendLine("resolve(dir=" + nodeDir + ") -> " + (byDir ?? "MISSING"));
                             if (!string.Equals(byDir, node.NodeExe, StringComparison.OrdinalIgnoreCase))
                             {
@@ -334,14 +334,26 @@ namespace DshNotifyicon
                                 code = 1;
                             }
                         }
-                        // 故意无效的指定：必须回退到自动检测，并标记 OverrideInvalid（界面据此点名提示）
+                        // 名字不对的文件必须被拒：选错程序的常见情形，不能"存在就当 node 用"
+                        var wrongName = Path.Combine(Path.GetTempPath(), "dsh-smoke-not-a-node.exe");
+                        try
+                        {
+                            File.Copy(Path.Combine(Environment.SystemDirectory, "where.exe"), wrongName, true);
+                            var wr = ToolPath.Resolve(wrongName, "node.exe");
+                            b.AppendLine("resolve(wrong name) -> " + (wr.Path ?? "REJECTED") + " reason=" + (wr.Error ?? "-"));
+                            if (wr.Path != null) { b.AppendLine("ASSERT FAIL: 名字不对的文件没有被拒"); code = 1; }
+                        }
+                        catch (Exception ex) { b.AppendLine("  (名字不对用例跳过: " + ex.Message + ")"); }
+                        finally { try { File.Delete(wrongName); } catch { } }
+
+                        // 故意无效的指定：必须回退到自动检测，并带上原因（界面据此点名提示）
                         var bogus = Path.Combine(Path.GetTempPath(), "dsh-no-such-tool-dir");
                         b.AppendLine("bogus override: " + bogus + " (exists=" + Directory.Exists(bogus) + ")");
                         var fallback = NodeService.DetectAsync(bogus, envPath).GetAwaiter().GetResult();
-                        b.AppendLine("node override(bogus) -> " + (fallback.NodeExe ?? "MISSING") + " overrideInvalid=" + fallback.OverrideInvalid);
-                        if (!fallback.OverrideInvalid)
+                        b.AppendLine("node override(bogus) -> " + (fallback.NodeExe ?? "MISSING") + " issue=" + (fallback.OverrideIssue ?? "-"));
+                        if (fallback.OverrideIssue == null)
                         {
-                            b.AppendLine("ASSERT FAIL: 无效指定没有被标记 OverrideInvalid");
+                            b.AppendLine("ASSERT FAIL: 无效指定没有带出原因");
                             code = 1;
                         }
                         if (!string.Equals(fallback.NodeExe, node.NodeExe, StringComparison.OrdinalIgnoreCase))
@@ -349,52 +361,80 @@ namespace DshNotifyicon
                             b.AppendLine("ASSERT FAIL: 无效指定没有回退到与自动检测相同的结果");
                             code = 1;
                         }
+                        // 名字对但跑不起来（空文件）同样必须被拒：只查存在性会在这里放行
+                        var deadDir = Path.Combine(Path.GetTempPath(), "dsh-smoke-dead-node");
+                        try
+                        {
+                            Directory.CreateDirectory(deadDir);
+                            File.WriteAllText(Path.Combine(deadDir, "node.exe"), "");
+                            var dead = NodeService.DetectAsync(deadDir, envPath).GetAwaiter().GetResult();
+                            b.AppendLine("node override(dead exe) -> " + (dead.NodeExe ?? "MISSING") + " issue=" + (dead.OverrideIssue ?? "-"));
+                            if (dead.OverrideIssue == null) { b.AppendLine("ASSERT FAIL: 跑不起来的同名文件没有被拒"); code = 1; }
+                            if (!string.Equals(dead.NodeExe, node.NodeExe, StringComparison.OrdinalIgnoreCase))
+                            { b.AppendLine("ASSERT FAIL: 同名无效文件没有回退"); code = 1; }
+                        }
+                        catch (Exception ex) { b.AppendLine("  (同名无效用例跳过: " + ex.Message + ")"); }
+                        finally { try { Directory.Delete(deadDir, true); } catch { } }
+
                         // 空指定 = 自动检测，绝不能被当成"无效指定"（否则界面会无端报警）
                         var empty = NodeService.DetectAsync("", envPath).GetAwaiter().GetResult();
-                        if (empty.OverrideInvalid)
+                        if (empty.OverrideIssue != null)
                         {
                             b.AppendLine("ASSERT FAIL: 空指定被误判为无效");
                             code = 1;
                         }
-                        var pnpmBogus = NpmService.FindPnpm(envPath, bogus);
-                        b.AppendLine("pnpm override(bogus) -> " + (pnpmBogus.Path ?? "MISSING") + " overrideInvalid=" + pnpmBogus.OverrideInvalid);
-                        if (!pnpmBogus.OverrideInvalid)
+                        var pnpmBogus = NpmService.FindPnpmAsync(envPath, bogus).GetAwaiter().GetResult();
+                        b.AppendLine("pnpm override(bogus) -> " + (pnpmBogus.Path ?? "MISSING") + " issue=" + (pnpmBogus.OverrideIssue ?? "-"));
+                        if (pnpmBogus.OverrideIssue == null)
                         {
-                            b.AppendLine("ASSERT FAIL: pnpm 无效指定没有被标记 OverrideInvalid");
+                            b.AppendLine("ASSERT FAIL: pnpm 无效指定没有带出原因");
                             code = 1;
                         }
-                        var pnpmAuto = NpmService.FindPnpm(envPath, "");
-                        b.AppendLine("pnpm override(empty) -> " + (pnpmAuto.Path ?? "MISSING") + " overrideInvalid=" + pnpmAuto.OverrideInvalid);
-                        if (pnpmAuto.OverrideInvalid)
+                        var pnpmAuto = NpmService.FindPnpmAsync(envPath, "").GetAwaiter().GetResult();
+                        b.AppendLine("pnpm override(empty) -> " + (pnpmAuto.Path ?? "MISSING") + " issue=" + (pnpmAuto.OverrideIssue ?? "-"));
+                        if (pnpmAuto.OverrideIssue != null)
                         {
                             b.AppendLine("ASSERT FAIL: pnpm 空指定被误判为无效");
                             code = 1;
                         }
                         // 回归点：NpmService 必须真的读到手动指定的 node。历史上这里写死过 null，
                         // 结果是"体检显示指定了 node，镜像源/dsh 版本却仍走 PATH"。
-                        // 放一个空的假 node.exe：override 生效时 npm 会因找不到 npm-cli.js 报错，
-                        // 被忽略时这个调用反而会成功。
-                        var fakeDir = Path.Combine(Path.GetTempPath(), "dsh-smoke-fake-node");
+                        // 用真 node.exe（能通过 --version 校验）放在没有 npm-cli.js 的临时目录里：
+                        // override 生效时 npm 会因找不到 npm-cli.js 报错；被忽略时反而会成功。
+                        var fakeDir = Path.Combine(Path.GetTempPath(), "dsh-smoke-node-link");
+                        var link = Path.Combine(fakeDir, "node.exe");
                         var prevOverride = ToolPathOverrides.Current;
                         string npmErr = null;
+                        bool linked = false;
                         try
                         {
-                            Directory.CreateDirectory(fakeDir);
-                            File.WriteAllText(Path.Combine(fakeDir, "node.exe"), "");
-                            ToolPathOverrides.Current = new Settings { NodePath = fakeDir };
-                            try { NpmService.GetRegistryAsync("", envPath).GetAwaiter().GetResult(); }
-                            catch (Exception ex) { npmErr = ex.Message; }
+                            if (node.NodeExe != null)
+                            {
+                                Directory.CreateDirectory(fakeDir);
+                                linked = MaterializeNode(link, node.NodeExe);
+                                if (!linked) b.AppendLine("  (既建不了硬链接也拷不了 node.exe，跳过该回归点)");
+                            }
+                            if (linked)
+                            {
+                                ToolPathOverrides.Current = new Settings { NodePath = fakeDir };
+                                try { NpmService.GetRegistryAsync("", envPath).GetAwaiter().GetResult(); }
+                                catch (Exception ex) { npmErr = ex.Message; }
+                            }
                         }
+                        catch (Exception ex) { b.AppendLine("  (npm override 回归点跳过: " + ex.Message + ")"); }
                         finally
                         {
                             ToolPathOverrides.Current = prevOverride;
                             try { Directory.Delete(fakeDir, true); } catch { }
                         }
-                        b.AppendLine("npm under fake node override -> " + (npmErr ?? "NO ERROR"));
-                        if (npmErr == null || npmErr.IndexOf("npm-cli.js", StringComparison.OrdinalIgnoreCase) < 0)
+                        if (linked)
                         {
-                            b.AppendLine("ASSERT FAIL: NpmService 没有使用手动指定的 node");
-                            code = 1;
+                            b.AppendLine("npm under hardlinked node override -> " + (npmErr ?? "NO ERROR"));
+                            if (npmErr == null || npmErr.IndexOf("npm-cli.js", StringComparison.OrdinalIgnoreCase) < 0)
+                            {
+                                b.AppendLine("ASSERT FAIL: NpmService 没有使用手动指定的 node");
+                                code = 1;
+                            }
                         }
                         var reg = NpmService.GetRegistryAsync("", envPath).GetAwaiter().GetResult();
                         b.AppendLine("registry: " + reg.Trim());
@@ -447,6 +487,33 @@ namespace DshNotifyicon
             }
             catch { }
             Environment.Exit(exit);
+        }
+
+        /// <summary>
+        /// 在指定位置放一个真 node.exe（冒烟回归点用）：优先硬链接（瞬时、零占用），
+        /// 硬链接不可用（某些文件系统/受限环境）时退化为拷贝 —— 宁可慢一点，
+        /// 也不能让这条回归守卫静默消失。
+        /// </summary>
+        static bool MaterializeNode(string link, string realNode)
+        {
+            try
+            {
+                if (File.Exists(link)) File.Delete(link);
+                ProcessRunner.RunAsync(new ProcessSpec
+                {
+                    FileName = "cmd.exe",
+                    Arguments = "/c mklink /H " + ProcessRunner.Quote(link) + " " + ProcessRunner.Quote(realNode),
+                    TimeoutMs = 20000
+                }, CancellationToken.None, null).GetAwaiter().GetResult();
+                if (File.Exists(link)) return true;
+            }
+            catch { }
+            try
+            {
+                File.Copy(realNode, link, true);
+                return File.Exists(link);
+            }
+            catch { return false; }
         }
 
         static bool HttpProbe(string url)

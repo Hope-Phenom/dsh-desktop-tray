@@ -410,26 +410,43 @@ namespace DshNotifyicon
 
         async void BtnPickPnpm_Click(object sender, RoutedEventArgs e)
         {
+            // pnpm 既可能是 pnpm.exe 也可能是 pnpm.cmd，两个名字都要认
             await PickToolPathAsync(
-                Loc.T("env.pickPnpmTitle"), Loc.T("env.pickPnpmHint"), "pnpm.exe",
+                Loc.T("env.pickPnpmTitle"), Loc.T("env.pickPnpmHint"), "pnpm.exe;pnpm.cmd",
                 () => App.Services.Settings.PnpmPath,
                 v => App.Services.Settings.PnpmPath = v);
         }
 
         /// <summary>
-        /// 指定路径 → 持久化 → 刷新 PATH → 重新体检。刷新这一步不能省：
-        /// 子进程（npm / dsh / 插件里的 spawnSync("pnpm")）看到的 PATH 来自 AppServices.EnvPath 的缓存。
+        /// 指定位置 → 当场校验（不合格先问一次）→ 持久化 → 刷新 PATH → 重新体检。
+        /// 校验放在这里是关键：填错位置当场就能知道，而不是等体检显示 ✓ 之后在别处报一个
+        /// 与指定位置毫不相干的错。校验不通过仍允许保存（路径可能只是暂时不可用）。
+        /// 刷新 PATH 这一步不能省：子进程（npm / dsh / 插件里的 spawnSync("pnpm")）看到的
+        /// PATH 来自 AppServices.EnvPath 的缓存。
         /// </summary>
-        async Task PickToolPathAsync(string title, string hint, string fileName, Func<string> read, Action<string> write)
+        async Task PickToolPathAsync(string title, string hint, string fileNames, Func<string> read, Action<string> write)
         {
             if (_opActive) return; // 长操作进行中：避免一边跑安装一边改路径
             if (!IsLoaded) ShowOrActivate();
-            var dlg = new PathPickerDialog(title, hint, read(), fileName) { Owner = this };
-            if (dlg.ShowDialog() != true) return;
-            write(dlg.Value ?? "");
-            SettingsService.Save(App.Services.Settings);
-            App.Services.RefreshEnvPath();
-            await RunEnvCheckAsync();
+            while (true)
+            {
+                var dlg = new PathPickerDialog(title, hint, read(), fileNames) { Owner = this };
+                if (dlg.ShowDialog() != true) return;
+                var v = dlg.Value ?? "";
+                if (v.Length > 0)
+                {
+                    var check = await ToolPath.CheckAsync(v, ToolPath.NodeProbeTimeoutMs, fileNames.Split(';'));
+                    if (check.Error != null &&
+                        MessageBox.Show(this, Loc.T("env.pickInvalid", v, check.Error), Loc.T("app.name"),
+                            MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+                        continue; // 回到对话框重填
+                }
+                write(v);
+                SettingsService.Save(App.Services.Settings);
+                App.Services.RefreshEnvPath();
+                await RunEnvCheckAsync();
+                return;
+            }
         }
 
         // ── 长操作统一交互（安装/更新）──
