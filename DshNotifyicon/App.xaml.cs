@@ -397,6 +397,35 @@ namespace DshNotifyicon
                             b.AppendLine("ASSERT FAIL: pnpm 空指定被误判为无效");
                             code = 1;
                         }
+                        // 回归点：被拒的指定绝不能进入交给子进程的 PATH。旧实现把它前置进全局 PATH，
+                        // 于是"回退自动检测"又沿着同一条 PATH 把被拒的文件捡回来：体检假 ✓、
+                        // dsh 拿着坏 node 启动失败、子进程里的裸 pnpm 命中坏 shim。
+                        var deadPnpmDir = Path.Combine(Path.GetTempPath(), "dsh-smoke-dead-pnpm");
+                        try
+                        {
+                            Directory.CreateDirectory(deadPnpmDir);
+                            File.WriteAllText(Path.Combine(deadPnpmDir, "pnpm.cmd"), "@echo off\r\n");
+                            var childPath = NpmService.ChildPathAsync(envPath, deadPnpmDir).GetAwaiter().GetResult();
+                            b.AppendLine("child path (dead pnpm override) head=" + childPath.Split(';')[0]);
+                            if (childPath.IndexOf(deadPnpmDir, StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                b.AppendLine("ASSERT FAIL: 被拒的指定进入了子进程 PATH");
+                                code = 1;
+                            }
+                        }
+                        catch (Exception ex) { b.AppendLine("  (被拒指定不进 PATH 的用例跳过: " + ex.Message + ")"); }
+                        finally { try { Directory.Delete(deadPnpmDir, true); } catch { } }
+                        // 反向对照：可用的手动指定 pnpm 必须进子进程 PATH（否则 dsh 的 spawnSync("pnpm") 找不到它）
+                        if (pnpmAuto.Path != null)
+                        {
+                            var dir = Path.GetDirectoryName(pnpmAuto.Path);
+                            var childPath2 = NpmService.ChildPathAsync(envPath, pnpmAuto.Path).GetAwaiter().GetResult();
+                            if (!childPath2.StartsWith(dir + ";", StringComparison.OrdinalIgnoreCase))
+                            {
+                                b.AppendLine("ASSERT FAIL: 可用的手动指定 pnpm 没有进入子进程 PATH");
+                                code = 1;
+                            }
+                        }
                         // 回归点：NpmService 必须真的读到手动指定的 node。历史上这里写死过 null，
                         // 结果是"体检显示指定了 node，镜像源/dsh 版本却仍走 PATH"。
                         // 用真 node.exe（能通过 --version 校验）放在没有 npm-cli.js 的临时目录里：
@@ -430,7 +459,9 @@ namespace DshNotifyicon
                         if (linked)
                         {
                             b.AppendLine("npm under hardlinked node override -> " + (npmErr ?? "NO ERROR"));
-                            if (npmErr == null || npmErr.IndexOf("npm-cli.js", StringComparison.OrdinalIgnoreCase) < 0)
+                            // 只要 override 生效，这个调用就必然失败（该目录没有 npm-cli.js）。
+                            // 不匹配错误文案：那样断言就与本地化字符串耦合了。
+                            if (npmErr == null)
                             {
                                 b.AppendLine("ASSERT FAIL: NpmService 没有使用手动指定的 node");
                                 code = 1;

@@ -214,12 +214,6 @@ namespace DshNotifyicon.Services
         }
 
         /// <summary>
-        /// pnpm 版本探测超时：corepack 托管的 pnpm.cmd 首次运行可能要自己下载，给足时间，
-        /// 免得把一个能用（只是首次慢）的 pnpm 误判成无效。
-        /// </summary>
-        const int PnpmProbeTimeoutMs = 30000;
-
-        /// <summary>
         /// 解析 pnpm 可执行文件：手动指定优先（pnpm.exe / pnpm.cmd 或其所在目录都接受，
         /// 校验不通过则记 OverrideIssue 并回退），否则在刷新后的 PATH 中查找。
         /// dsh 的 plugin 命令内部 spawnSync("pnpm")，缺失会报 "'pnpm' 不是内部或外部命令"。
@@ -229,7 +223,7 @@ namespace DshNotifyicon.Services
         {
             // 传 null 走"当前生效的手动指定"（ToolPathOverrides），调用方无设置对象时也不会漏
             var input = pnpmOverride ?? ToolPathOverrides.Pnpm;
-            var check = await ToolPath.CheckAsync(input, PnpmProbeTimeoutMs, "pnpm.exe", "pnpm.cmd");
+            var check = await ToolPath.CheckAsync(input, ToolPath.PnpmProbeTimeoutMs, "pnpm.exe", "pnpm.cmd");
             var info = new PnpmInfo { Path = check.Path, OverrideIssue = check.Error };
             if (info.Path != null) return info;
 
@@ -251,19 +245,47 @@ namespace DshNotifyicon.Services
         }
 
         /// <summary>
+        /// 交给子进程的 PATH：在 envPath 前加上"已校验通过"的手动指定 pnpm 所在目录。
+        /// dsh 的 plugin 命令内部 spawnSync("pnpm") 只认 PATH，所以指定位置必须靠这一步生效；
+        /// 但校验不通过时什么都不加 —— 把坏目录前置会让子进程里的裸 pnpm 命中它，
+        /// 那正是"指定了坏路径"最难受的失败方式（app 自己已回退，子进程却还在用坏的）。
+        /// </summary>
+        public static async Task<string> ChildPathAsync(string envPath, string pnpmOverride = null)
+        {
+            var input = pnpmOverride ?? ToolPathOverrides.Pnpm;
+            var check = await ToolPath.CheckAsync(input, ToolPath.PnpmProbeTimeoutMs, "pnpm.exe", "pnpm.cmd");
+            return check.Path == null ? envPath : PrependDir(envPath, check.Path);
+        }
+
+        /// <summary>把某个可执行文件所在目录前置进 PATH（取不到目录时原样返回）。</summary>
+        static string PrependDir(string envPath, string exePath)
+        {
+            try
+            {
+                var dir = Path.GetDirectoryName(exePath);
+                if (string.IsNullOrEmpty(dir)) return envPath;
+                return dir + ";" + (envPath ?? "");
+            }
+            catch { return envPath; } // GetDirectoryName 会校验非法字符
+        }
+
+        /// <summary>
         /// 确保 pnpm 可用：手动指定的那份算"可用"（不会去 npm install -g pnpm 把它覆盖掉），
         /// 否则缺失时 npm install -g pnpm（尊重镜像源），安装后刷新 PATH 再验证。
-        /// 返回应交给子进程的 PATH（手动指定的目录仍需重新前置，RefreshPath() 只反映注册表与进程 PATH）。
+        /// 返回应交给子进程的 PATH：只注入**实际会用到的那份** pnpm 所在目录。
         /// </summary>
         public static async Task<string> EnsurePnpmAsync(string mirrorUrl, string envPath, Action<string> log, CancellationToken ct)
         {
-            if ((await FindPnpmAsync(envPath)).Path != null) return envPath;
+            var found = await FindPnpmAsync(envPath);
+            if (found.Path != null) return PrependDir(envPath, found.Path);
+
             log(Loc.T("npm.pnpmInstalling"));
             await WithGateAsync(() => ExecNpmAsync("install -g pnpm" + RegistryArg(mirrorUrl), envPath, log, ct));
             var fresh = NodeService.RefreshPath();
-            if ((await FindPnpmAsync(fresh)).Path == null)
+            var after = await FindPnpmAsync(fresh);
+            if (after.Path == null)
                 throw new InvalidOperationException(Loc.T("npm.pnpmInstallFail"));
-            return NodeService.WithToolOverrides(fresh, ToolPathOverrides.Node, ToolPathOverrides.Pnpm);
+            return PrependDir(fresh, after.Path);
         }
     }
 }

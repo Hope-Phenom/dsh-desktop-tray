@@ -30,17 +30,22 @@ namespace DshNotifyicon
             Main = new MainWindow();
         }
 
-        /// <summary>刷新后的 PATH + 手动指定的 node/pnpm 目录（前置，对所有子进程可见）。</summary>
+        /// <summary>
+        /// 刷新后的 PATH。注意这里**不**夹带手动指定的目录：手动指定的工具可能已被卸载/损坏，
+        /// 一旦把它的目录前置，本工具自己的"回退自动检测"就会沿着同一条 PATH 把被拒的文件捡回来
+        /// （体检显示 ✓、dsh 拿着坏 node 启动失败）。要用手动指定的 pnpm 时，
+        /// 由 NpmService 校验通过后只注入到那一个子进程上（见 ChildPathAsync）。
+        /// </summary>
         public string EnvPath
         {
-            get { return _envPath ?? (_envPath = BuildEnvPath()); }
+            get { return _envPath ?? (_envPath = NodeService.RefreshPath()); }
         }
 
-        public void RefreshEnvPath() { _envPath = BuildEnvPath(); }
-
-        static string BuildEnvPath()
+        /// <summary>刷新 PATH 缓存；同时丢弃 bin.js 缓存（换了 node 之后全局前缀可能完全不同）。</summary>
+        public void RefreshEnvPath()
         {
-            return NodeService.WithToolOverrides(NodeService.RefreshPath(), ToolPathOverrides.Node, ToolPathOverrides.Pnpm);
+            _envPath = NodeService.RefreshPath();
+            _binJs = null;
         }
 
         /// <summary>解析 dsh bin.js 路径（缓存）。未安装返回 null。</summary>

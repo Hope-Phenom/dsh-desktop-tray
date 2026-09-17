@@ -138,10 +138,14 @@ namespace DshNotifyicon.Services
             return items;
         }
 
-        /// <summary>"手动指定但校验不通过"的提示行（含原因）；未指定或通过时为空串。</summary>
+        /// <summary>
+        /// "手动指定但校验不通过"的提示行（含原因）；未指定或通过时为空串。
+        /// 措辞必须只说"这个指定被忽略了"，不能说"已回退自动检测到 X"——
+        /// 自动检测的结果就显示在本项正文里，而用户填的路径不是那个结果（Node 缺失时更无从谈起）。
+        /// </summary>
         static string OverrideHint(string input, string issue)
         {
-            return string.IsNullOrEmpty(issue) ? "" : "\n" + Loc.T("ec.overrideFallback", input, issue);
+            return string.IsNullOrEmpty(issue) ? "" : "\n" + Loc.T("ec.overrideIgnored", input, issue);
         }
     }
 }

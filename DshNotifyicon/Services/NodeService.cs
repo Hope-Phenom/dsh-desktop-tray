@@ -127,6 +127,13 @@ namespace DshNotifyicon.Services
         public const int NodeProbeTimeoutMs = 15000;
 
         /// <summary>
+        /// pnpm 的版本探测超时：corepack 托管的 pnpm.cmd 首次运行要自己下载，
+        /// 给足时间，免得把一个能用（只是首次慢）的 pnpm 误判成无效。
+        /// 对话框与体检必须用同一个值，否则同一个位置会得出两种结论。
+        /// </summary>
+        public const int PnpmProbeTimeoutMs = 30000;
+
+        /// <summary>
         /// 结构解析。目录 → 逐个候选文件名找；文件 → 文件名必须就是候选名之一
         /// （常见错误是在同一目录里点了别的 exe）。空输入不算错误（= 未指定）。
         /// </summary>
@@ -174,8 +181,10 @@ namespace DshNotifyicon.Services
             c.Version = await ProbeVersionAsync(c.Path, timeoutMs);
             if (c.Version == null)
             {
+                // 点名被拒的那个文件（pnpm 的候选名有两个，写死第一个会把 pnpm.cmd 说成 pnpm.exe）
+                var actual = Path.GetFileName(c.Path);
                 c.Path = null;
-                c.Error = Loc.T("path.notRunnable", fileNames[0]);
+                c.Error = Loc.T("path.notRunnable", actual);
             }
             return c;
         }
@@ -183,7 +192,13 @@ namespace DshNotifyicon.Services
         /// <summary>
         /// 跑 &lt;exe&gt; --version，返回输出里第一个能解析成版本号的行。
         /// 跑不起来、超时、输出不像版本号一律返回 null。
-        /// .cmd/.bat 必须经 cmd.exe 才能启动（CreateProcess 不认批处理），所以要显式拼一次 /c。
+        /// .cmd/.bat 必须经 cmd.exe 才能启动（CreateProcess 不认批处理）。
+        /// 这里有两处讲究：
+        /// 1) cmd.exe 取绝对路径 —— 本工具专门跑在 PATH 可能损坏的机器上，裸 "cmd.exe" 解析不到
+        ///    就会把一个完全正常的 pnpm.cmd 判成无效；
+        /// 2) 用 cmd 的规范形式 /d /s /c ""&lt;path&gt;" --version"，路径必须被成对引号包住：
+        ///    否则 /c 之后 cmd 的剥引号规则会把含 &amp; ( ) 的路径截断成另一条命令（实测）。
+        /// 已知限制：路径里若含 %（会被 cmd 当变量展开）仍可能出问题，Windows 工具路径里属病态情形。
         /// </summary>
         public static async Task<string> ProbeVersionAsync(string exePath, int timeoutMs)
         {
@@ -193,8 +208,8 @@ namespace DshNotifyicon.Services
                 var spec = ext == ".cmd" || ext == ".bat"
                     ? new ProcessSpec
                     {
-                        FileName = "cmd.exe",
-                        Arguments = "/c " + ProcessRunner.Quote(exePath) + " --version",
+                        FileName = Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+                        Arguments = "/d /s /c \"\"" + exePath + "\" --version\"",
                         TimeoutMs = timeoutMs
                     }
                     : new ProcessSpec { FileName = exePath, Arguments = "--version", TimeoutMs = timeoutMs };
@@ -218,7 +233,8 @@ namespace DshNotifyicon.Services
     /// </summary>
     public static class ToolPathOverrides
     {
-        public static Settings Current;
+        /// <summary>当前设置对象。写发生在 UI 线程（构造/环境页），读发生在后台线程，故标 volatile。</summary>
+        public static volatile Settings Current;
 
         public static string Node { get { return Current == null ? "" : Current.NodePath; } }
         public static string Pnpm { get { return Current == null ? "" : Current.PnpmPath; } }
@@ -268,31 +284,6 @@ namespace DshNotifyicon.Services
             var merged = new List<string>();
             foreach (var p in parts) if (seen.Add(p)) merged.Add(p);
             return string.Join(";", merged);
-        }
-
-        /// <summary>
-        /// 把手动指定的 node / pnpm 所在目录前置到 PATH 首部，让所有子进程（npm、dsh 主进程、
-        /// 以及 dsh 插件内部的 spawnSync("pnpm")）都看得见用户指定的那一份工具。
-        /// 指定的路径无效时不动 PATH —— 体检负责把这种情况点名，而不是悄悄拿别处的工具顶上。
-        /// </summary>
-        public static string WithToolOverrides(string envPath, string nodePath, string pnpmPath)
-        {
-            var dirs = new List<string>();
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            Action<string> addDir = (exe) =>
-            {
-                if (exe == null) return;
-                try
-                {
-                    var dir = Path.GetDirectoryName(exe);
-                    if (!string.IsNullOrEmpty(dir) && seen.Add(dir)) dirs.Add(dir);
-                }
-                catch { } // GetDirectoryName 会校验非法字符：拿不到目录就当没指定
-            };
-            addDir(ToolPath.Resolve(nodePath, "node.exe").Path);
-            addDir(ToolPath.Resolve(pnpmPath, "pnpm.exe", "pnpm.cmd").Path);
-            if (dirs.Count == 0) return envPath;
-            return string.Join(";", dirs) + ";" + (envPath ?? "");
         }
 
         /// <summary>

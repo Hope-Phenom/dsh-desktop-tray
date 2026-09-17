@@ -51,6 +51,7 @@ namespace DshNotifyicon
                 Margin = new Thickness(0, 14, 0, 0)
             };
             buttons.Children.Add(MakeButton(Loc.T("env.pickBrowse"), 90, (s, e) => Browse()));
+            buttons.Children.Add(MakeButton(Loc.T("env.pickBrowseDir"), 100, (s, e) => BrowseDir()));
             buttons.Children.Add(MakeButton(Loc.T("env.pickClear"), 100, (s, e) => { Value = ""; DialogResult = true; }));
             var ok = MakeButton(Loc.T("env.pickOk"), 80, (s, e) => { Value = (_box.Text ?? "").Trim(); DialogResult = true; });
             ok.IsDefault = true;
@@ -90,6 +91,27 @@ namespace DshNotifyicon
             }
             catch { } // 非法字符：忽略定位，仍可正常浏览
             if (dlg.ShowDialog(this) == true) _box.Text = dlg.FileName;
+        }
+
+        /// <summary>
+        /// 选目录：输入本来就允许填"可执行文件所在目录"，但 OpenFileDialog 只能选文件，
+        /// 所以另给一个目录选择入口（WinForms 的 FolderBrowserDialog；WPF 在 .NET Framework 4.6.2 没有原生目录选择器）。
+        /// </summary>
+        void BrowseDir()
+        {
+            var dlg = new System.Windows.Forms.FolderBrowserDialog
+            {
+                Description = Loc.T("env.pickBrowseDir"),
+                ShowNewFolderButton = false
+            };
+            var cur = PathGuard.StripQuotes(_box.Text);
+            try
+            {
+                if (Directory.Exists(cur)) dlg.SelectedPath = cur;
+                else if (File.Exists(cur)) dlg.SelectedPath = Path.GetDirectoryName(cur) ?? "";
+            }
+            catch { } // 非法字符：忽略定位
+            if (dlg.ShowDialog() == System.Windows.Forms.DialogResult.OK) _box.Text = dlg.SelectedPath;
         }
     }
 }

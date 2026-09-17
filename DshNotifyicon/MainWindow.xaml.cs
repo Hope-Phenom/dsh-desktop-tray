@@ -403,7 +403,7 @@ namespace DshNotifyicon
         async void BtnPickNode_Click(object sender, RoutedEventArgs e)
         {
             await PickToolPathAsync(
-                Loc.T("env.pickNodeTitle"), Loc.T("env.pickNodeHint"), "node.exe",
+                Loc.T("env.pickNodeTitle"), Loc.T("env.pickNodeHint"), "node.exe", ToolPath.NodeProbeTimeoutMs,
                 () => App.Services.Settings.NodePath,
                 v => App.Services.Settings.NodePath = v);
         }
@@ -412,7 +412,7 @@ namespace DshNotifyicon
         {
             // pnpm 既可能是 pnpm.exe 也可能是 pnpm.cmd，两个名字都要认
             await PickToolPathAsync(
-                Loc.T("env.pickPnpmTitle"), Loc.T("env.pickPnpmHint"), "pnpm.exe;pnpm.cmd",
+                Loc.T("env.pickPnpmTitle"), Loc.T("env.pickPnpmHint"), "pnpm.exe;pnpm.cmd", ToolPath.PnpmProbeTimeoutMs,
                 () => App.Services.Settings.PnpmPath,
                 v => App.Services.Settings.PnpmPath = v);
         }
@@ -423,25 +423,32 @@ namespace DshNotifyicon
         /// 与指定位置毫不相干的错。校验不通过仍允许保存（路径可能只是暂时不可用）。
         /// 刷新 PATH 这一步不能省：子进程（npm / dsh / 插件里的 spawnSync("pnpm")）看到的
         /// PATH 来自 AppServices.EnvPath 的缓存。
+        /// probeTimeoutMs 必须按工具分别传：pnpm.cmd 若是 corepack 托管，首次运行要自己下载。
         /// </summary>
-        async Task PickToolPathAsync(string title, string hint, string fileNames, Func<string> read, Action<string> write)
+        async Task PickToolPathAsync(string title, string hint, string fileNames, int probeTimeoutMs,
+            Func<string> read, Action<string> write)
         {
-            if (_opActive) return; // 长操作进行中：避免一边跑安装一边改路径
+            if (_opActive) return; // 长操作进行中：两个入口按钮此时是禁用的，正常点不到这里
             if (!IsLoaded) ShowOrActivate();
+            // 记住用户当前填的值：选"返回重填"时要带着它回去，否则刚粘进来的长路径得重新粘一遍
+            var draft = read() ?? "";
             while (true)
             {
-                var dlg = new PathPickerDialog(title, hint, read(), fileNames) { Owner = this };
+                var dlg = new PathPickerDialog(title, hint, draft, fileNames) { Owner = this };
                 if (dlg.ShowDialog() != true) return;
                 var v = dlg.Value ?? "";
                 if (v.Length > 0)
                 {
-                    var check = await ToolPath.CheckAsync(v, ToolPath.NodeProbeTimeoutMs, fileNames.Split(';'));
+                    var check = await ToolPath.CheckAsync(v, probeTimeoutMs, fileNames.Split(';'));
                     if (check.Error != null &&
                         MessageBox.Show(this, Loc.T("env.pickInvalid", v, check.Error), Loc.T("app.name"),
                             MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
-                        continue; // 回到对话框重填
+                    {
+                        draft = v;
+                        continue; // 回对话框重填
+                    }
                 }
-                write(v);
+                write(PathGuard.StripQuotes(v)); // 存干净路径：用户常连引号一起粘进来
                 SettingsService.Save(App.Services.Settings);
                 App.Services.RefreshEnvPath();
                 await RunEnvCheckAsync();
@@ -470,6 +477,9 @@ namespace DshNotifyicon
             _opCts = new CancellationTokenSource();
             var ct = _opCts.Token;
             var origContent = busyButton != null ? busyButton.Content : null;
+            // 长操作期间禁掉"指定位置"入口：否则点下去既无反馈、又可能和正在跑的安装抢同一份设置
+            btnPickNode.IsEnabled = false;
+            btnPickPnpm.IsEnabled = false;
 
             Action<string> progressSink = line =>
             {
@@ -510,6 +520,8 @@ namespace DshNotifyicon
                 _opCts = null;
                 if (busyButton != null) busyButton.Content = origContent;
                 if (disableButton != null) disableButton.IsEnabled = true;
+                btnPickNode.IsEnabled = true;
+                btnPickPnpm.IsEnabled = true;
                 prgOp.Visibility = Visibility.Collapsed;
             }
             if (succeeded && after != null) await after();
@@ -620,7 +632,10 @@ namespace DshNotifyicon
                     }
                 }
 
-                bool ok = await App.Services.Dsh.StartAsync(port, random, s.TrustedHosts, node.NodeExe, binJs, App.Services.EnvPath, s.NotifySubagents, s.EnableNotifications);
+                // 交给 dsh 的 PATH 里带上"已校验通过"的手动指定 pnpm：用户若在 dsh 自己的 Web UI 里
+                // 装插件，那个进程内的 spawnSync("pnpm") 也才找得到它。校验不通过则一个字都不加。
+                var dshPath = await NpmService.ChildPathAsync(App.Services.EnvPath, s.PnpmPath);
+                bool ok = await App.Services.Dsh.StartAsync(port, random, s.TrustedHosts, node.NodeExe, binJs, dshPath, s.NotifySubagents, s.EnableNotifications);
                 return ok;
             }
             catch (Exception ex)
@@ -967,8 +982,9 @@ namespace DshNotifyicon
                     stoppedDsh = true;
                 }
 
-                // dsh 的 plugin add 内部会 spawnSync("pnpm")，缺失时先自动安装 pnpm
-                await NpmService.EnsurePnpmAsync(App.Services.Settings.MirrorUrl, App.Services.EnvPath, line => TraceLog(line), CancellationToken.None);
+                // dsh 的 plugin add 内部会 spawnSync("pnpm")，缺失时先自动安装 pnpm。
+                // 用它的返回值当子进程 PATH：里面只含"确实可用"的那份 pnpm 目录。
+                var pluginPath = await NpmService.EnsurePnpmAsync(App.Services.Settings.MirrorUrl, App.Services.EnvPath, line => TraceLog(line), CancellationToken.None);
                 App.Services.RefreshEnvPath();
 
                 var spec = "link:" + pluginDir.Replace('\\', '/');
@@ -978,7 +994,7 @@ namespace DshNotifyicon
                 {
                     FileName = node.NodeExe,
                     Arguments = args,
-                    Environment = new Dictionary<string, string> { { "Path", App.Services.EnvPath } },
+                    Environment = new Dictionary<string, string> { { "Path", pluginPath } },
                     TimeoutMs = 120000
                 }, CancellationToken.None, line => TraceLog(line));
 
@@ -1325,8 +1341,8 @@ namespace DshNotifyicon
                     stoppedDsh = true;
                 }
 
-                // 卸载同样走 dsh plugin → pnpm，先确保 pnpm 可用
-                await NpmService.EnsurePnpmAsync(App.Services.Settings.MirrorUrl, App.Services.EnvPath, line => TraceLog(line), CancellationToken.None);
+                // 卸载同样走 dsh plugin → pnpm，先确保 pnpm 可用（返回值见上：只含可用的那份）
+                var uninstallPath = await NpmService.EnsurePnpmAsync(App.Services.Settings.MirrorUrl, App.Services.EnvPath, line => TraceLog(line), CancellationToken.None);
                 App.Services.RefreshEnvPath();
 
                 var args = ProcessRunner.Quote(binJs) + " plugin --profile web remove dsh-notify-hook";
@@ -1335,7 +1351,7 @@ namespace DshNotifyicon
                 {
                     FileName = node.NodeExe,
                     Arguments = args,
-                    Environment = new Dictionary<string, string> { { "Path", App.Services.EnvPath } },
+                    Environment = new Dictionary<string, string> { { "Path", uninstallPath } },
                     TimeoutMs = 120000
                 }, CancellationToken.None, line => TraceLog(line));
 
